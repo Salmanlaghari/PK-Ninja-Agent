@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── PK Ninja Agent project entries ────────────────────────────────────────
+.env
+*.db
+*.db-journal
+workspaces/
+pk_ninja.db
+.venv/
+venv/
+todo.md
+backend/__pycache__/
+tests/__pycache__/
