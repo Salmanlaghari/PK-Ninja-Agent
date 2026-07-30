@@ -18,7 +18,9 @@ def client():
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "version" in body
 
 
 def test_create_task_and_stream(client):

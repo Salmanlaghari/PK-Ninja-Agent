@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0e14" />
+  <meta name="theme-color" content="#0a0d14" />
   <title>PK Ninja Agent</title>
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗡️</text></svg>" />
@@ -16,14 +16,20 @@
         <span class="kanji">忍</span>
         <span class="name">PK <b>NINJA</b><span>coding agent</span></span>
       </div>
-      <span id="status" class="status-pill idle"><span class="dot"></span><span id="status-text">Idle</span></span>
+      <div class="header-right">
+        <span id="provider-badge" class="provider-badge" hidden>
+          <span class="spark"></span>
+          <span id="provider-name">local</span>
+        </span>
+        <span id="status" class="status-pill idle"><span class="dot"></span><span id="status-text">Idle</span></span>
+      </div>
     </div>
   </header>
 
   <main class="wrap">
     <!-- Repository -->
     <section class="panel">
-      <div class="panel-head"><span class="ico">⎇</span> Repository</div>
+      <div class="panel-head"><span class="ico">⏧</span> Repository</div>
       <div class="panel-body">
         <div id="repo-row" class="repo-row">
           <span class="repo-icon">📦</span>
@@ -41,7 +47,10 @@
       <div class="panel-body">
         <textarea id="task" class="task-input"
           placeholder="Describe a coding task, e.g. &#34;Add module docstrings to all Python files&#34; or &#34;Create a README.md describing the project&#34;"></textarea>
-        <button id="start" class="btn primary">⚔️ Start Agent</button>
+        <div class="btn-row">
+          <button id="start" class="btn primary">⚔️ Start Agent</button>
+          <button id="cancel" class="btn danger" hidden>✖ Cancel</button>
+        </div>
       </div>
     </section>
 
@@ -64,6 +73,12 @@
       </summary>
       <div class="panel-body">
         <div id="terminal" class="terminal"><div class="empty">Terminal output from real command execution will appear here.</div></div>
+        <div class="term-input-row">
+          <input id="term-input" class="term-input" type="text"
+            placeholder="Run a sandboxed command (e.g. ls -la, python --version)…"
+            autocomplete="off" spellcheck="false" disabled />
+          <button id="term-run" class="btn small" disabled>Run</button>
+        </div>
       </div>
     </details>
 
@@ -90,7 +105,7 @@
     <!-- Git controls -->
     <details class="panel">
       <summary>
-        <div class="panel-head"><span class="ico">⎇</span> Git Controls <span class="chev">›</span></div>
+        <div class="panel-head"><span class="ico">⏧</span> Git Controls <span class="chev">›</span></div>
       </summary>
       <div class="panel-body git-controls">
         <input id="branch-name" type="text" placeholder="Branch name (e.g. feat/add-docstrings)" />

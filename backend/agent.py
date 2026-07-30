@@ -1,4 +1,4 @@
-"""Agent: the event system and the agent loop.
+"""Agent: the event system and the interactive agent loop.
 
 The agent loop is the real workflow:
 
@@ -6,33 +6,49 @@ The agent loop is the real workflow:
   -> (on failure) ANALYZE -> FIX -> VERIFY again -> DIFF -> BRANCH -> COMMIT -> PUSH
 
 Every step emits an :class:`Event` that is persisted to SQLite and streamed to
-the frontend via SSE. The agent never fakes activity: tools run against the
-real workspace and emit events from their actual results.
+the frontend via SSE **and** WebSocket. The agent never fakes activity: tools
+run against the real workspace and emit events from their actual results.
+
+Interactive features added in v2:
+  * Streaming AI tokens: when a non-local provider is configured, the plan and
+    analysis steps stream real model output token-by-token via ``thinking``
+    events.
+  * Robust cancellation: the cancel flag is checked before every step and the
+    running subprocess is killed so a cancel actually stops work.
+  * Canonical task statuses: idle / running / success / failed / cancelled.
 """
 from __future__ import annotations
 
-import asyncio
 import datetime as _dt
 import logging
 import os
 import queue
+import shlex
+import signal
+import subprocess
 import threading
 import traceback
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from ai_provider import AIError, get_provider
+from ai_provider import (
+    AIError,
+    ChatMessage,
+    LocalProvider,
+    Plan,
+    get_provider,
+)
 from config import Settings, get_settings
 from github import GitHubError, clone_or_pull, repo_info
 from models import EventType, TaskStatus
-from terminal import TerminalError, run_command
+from terminal import TerminalError, run_command, validate_command
 from workspace import Workspace, WorkspaceError
 
 log = logging.getLogger("pk_ninja.agent")
 
 
-# ── Events ─────────────────────────────────────────────────────────────────
+# ── Events ──────────────────────────────────────────────────────────────
 @dataclass
 class Event:
     task_id: str
@@ -54,9 +70,9 @@ class Event:
 class EventBus:
     """In-process pub/sub + bounded history per task.
 
-    A background thread publishes events; SSE consumers read them from a
-    thread-safe queue. We also keep an in-memory ring so late subscribers get
-    recent history, and persist every event to SQLite for durability.
+    A background thread publishes events; SSE/WebSocket consumers read them
+    from a thread-safe queue. We also keep an in-memory ring so late
+    subscribers get recent history, and persist every event to SQLite.
     """
 
     def __init__(self) -> None:
@@ -71,26 +87,25 @@ class EventBus:
     def publish(self, event: Event) -> None:
         with self._lock:
             self._history.setdefault(event.task_id, []).append(event)
-            # Keep last 500 events in memory.
-            if len(self._history[event.task_id]) > 500:
-                self._history[event.task_id] = self._history[event.task_id][-500:]
+            if len(self._history[event.task_id]) > 1000:
+                self._history[event.task_id] = self._history[event.task_id][-1000:]
             subs = list(self._subs.get(event.task_id, []))
         if self._persist:
             try:
                 self._persist(event)
-            except Exception:  # pragma: no cover - persistence must not break agent
+            except Exception:  # pragma: no cover
                 log.exception("Failed to persist event")
         for q in subs:
             try:
                 q.put_nowait(event)
             except queue.Full:
-                pass  # slow consumer; drop (history retains it)
+                pass
 
     def history(self, task_id: str) -> List[Event]:
         with self._lock:
             return list(self._history.get(task_id, []))
 
-    def subscribe(self, task_id: str, maxsize: int = 1000) -> queue.Queue:
+    def subscribe(self, task_id: str, maxsize: int = 2000) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
         with self._lock:
             self._subs.setdefault(task_id, []).append(q)
@@ -109,17 +124,22 @@ class EventBus:
 BUS = EventBus()
 
 
-# ── Task runtime state ────────────────────────────────────────────────────
+# ── Task runtime state ──────────────────────────────────────────────────
 @dataclass
 class TaskRuntime:
     task_id: str
     description: str
-    status: TaskStatus = TaskStatus.pending
+    status: TaskStatus = TaskStatus.idle
     workspace: Optional[Workspace] = None
     branch: Optional[str] = None
     thread: Optional[threading.Thread] = None
     cancel: threading.Event = field(default_factory=threading.Event)
     repo_full: Optional[str] = None
+    # The currently-running subprocess (so cancel can kill it).
+    current_proc: Optional[subprocess.Popen] = None
+    current_proc_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Cumulative streamed text from the AI (for the UI).
+    streamed_text: List[str] = field(default_factory=list)
 
 
 _RUNTIMES: Dict[str, TaskRuntime] = {}
@@ -136,7 +156,7 @@ def list_runtimes() -> List[TaskRuntime]:
         return list(_RUNTIMES.values())
 
 
-# ── Tool registry ─────────────────────────────────────────────────────────
+# ── Tool registry ───────────────────────────────────────────────────────
 # Each tool is a pure function (workspace, **kwargs) -> dict. The agent calls
 # them and emits events from their *real* return values.
 def tool_list_files(ws: Workspace, subpath: str = "") -> dict:
@@ -184,16 +204,20 @@ def tool_git_diff(ws: Workspace, staged: bool = False) -> dict:
 
 
 def tool_run_command(ws: Workspace, command: str,
-                     emit: Optional[Callable] = None) -> dict:
-    """Run a real command. ``emit`` lets the loop stream per-command events."""
+                     emit: Optional[Callable] = None,
+                     rt: Optional["TaskRuntime"] = None) -> dict:
+    """Run a real command. ``emit`` lets the loop stream per-command events.
+
+    If ``rt`` is provided, the live subprocess handle is stored on it so a
+    cancel request can kill the running process.
+    """
     try:
-        from terminal import validate_command
         decision = validate_command(command)
         warning = decision.warning if decision.allowed else None
         if emit:
             emit(EventType.command_started, f"$ {command}",
                  data={"warning": warning} if warning else {})
-        result = run_command(command, ws)
+        result = run_command(command, ws, rt=rt)
         if emit:
             emit(EventType.command_output,
                  result.stdout or result.stderr or "(no output)",
@@ -231,11 +255,14 @@ TOOLS: Dict[str, Callable] = {
 }
 
 
-# ── Agent loop ─────────────────────────────────────────────────────────────
+# ── Agent loop ──────────────────────────────────────────────────────────
 class Agent:
     """Runs the agent loop for one task in a background thread."""
 
     MAX_FIX_RETRIES = 2
+    # Cap how many thinking-token events we publish per AI call (keeps the
+    # event stream and DB from being flooded with single-char events).
+    _THINKING_FLUSH_CHARS = 12
 
     def __init__(self, task_id: str, description: str,
                  repo_full: Optional[str] = None,
@@ -247,12 +274,52 @@ class Agent:
         self.rt = TaskRuntime(task_id=task_id, description=description,
                               repo_full=repo_full)
         self.provider = get_provider(self.settings)
+        self._is_streaming_provider = not isinstance(self.provider, LocalProvider)
 
-    # ── Event helpers ──────────────────────────────────────────────────────
+    # ── Event helpers ──────────────────────────────────────────────────
     def emit(self, etype: EventType, message: str, **data: Any) -> None:
         BUS.publish(Event(self.task_id, etype, message, data=dict(data)))
 
-    # ── Main loop ──────────────────────────────────────────────────────────
+    def _stream_ai(self, messages: List[ChatMessage],
+                   context_label: str = "AI") -> str:
+        """Call the provider's stream_chat and emit real thinking tokens.
+
+        Returns the full accumulated text. For the LocalProvider the
+        'streaming' is deterministic word-by-word (still real provider
+        output, not faked activity).
+        """
+        buffer: List[str] = []
+
+        def on_token(tok: str) -> None:
+            buffer.append(tok)
+            self.rt.streamed_text.append(tok)
+            # Flush in batches to avoid one event per character.
+            joined = "".join(buffer)
+            if len(joined) >= self._THINKING_FLUSH_CHARS or tok.endswith("\n"):
+                self.emit(EventType.thinking, joined,
+                          source=context_label, streaming=True)
+                buffer.clear()
+
+        try:
+            result = self.provider.stream_chat(messages, on_token=on_token)
+        except AIError as exc:
+            # Provider failed mid-stream — surface honestly and fall back.
+            self.emit(EventType.error, f"AI provider error: {exc}")
+            # Try the local provider as a graceful degradation.
+            self.emit(EventType.info,
+                      "Falling back to the offline local provider.")
+            self.provider = LocalProvider()
+            self._is_streaming_provider = False
+            result = self.provider.stream_chat(messages, on_token=on_token)
+
+        # Flush any remaining buffered text.
+        if buffer:
+            self.emit(EventType.thinking, "".join(buffer),
+                      source=context_label, streaming=True)
+            buffer.clear()
+        return result.text
+
+    # ── Main loop ──────────────────────────────────────────────────────
     def run(self) -> None:
         rt = self.rt
         with _RUNTIMES_LOCK:
@@ -260,29 +327,38 @@ class Agent:
         rt.status = TaskStatus.running
         self.emit(EventType.session_started,
                   f"Session started for task: {self.description[:120]}",
-                  task=self.description)
+                  task=self.description,
+                  provider=self.provider.name,
+                  streaming=self._is_streaming_provider)
         try:
             self._loop(rt)
-            if not rt.cancel.is_set():
-                rt.status = TaskStatus.completed
+            if rt.cancel.is_set():
+                rt.status = TaskStatus.cancelled
+                self.emit(EventType.cancelled, "Task cancelled by user.")
+            else:
+                rt.status = TaskStatus.success
                 self.emit(EventType.completed,
                           "Agent completed the task.",
-                          branch=rt.branch)
+                          branch=rt.branch,
+                          status="success")
+        except _Cancelled as exc:
+            rt.status = TaskStatus.cancelled
+            self.emit(EventType.cancelled, str(exc) or "Task cancelled by user.")
         except Exception as exc:
             rt.status = TaskStatus.failed
             log.exception("Agent loop failed")
             self.emit(EventType.error,
                       f"Agent failed: {exc}",
-                      trace=traceback.format_exc(limit=4))
+                      trace=traceback.format_exc(limit=4),
+                      status="failed")
         finally:
             with _RUNTIMES_LOCK:
                 _RUNTIMES[self.task_id] = rt
 
     def _check_cancel(self, rt: TaskRuntime) -> bool:
+        """Raise _Cancelled if the user asked to cancel."""
         if rt.cancel.is_set():
-            self.emit(EventType.info, "Task cancelled by user.")
-            rt.status = TaskStatus.cancelled
-            return True
+            raise _Cancelled("Task cancelled by user.")
         return False
 
     def _loop(self, rt: TaskRuntime) -> None:
@@ -294,9 +370,7 @@ class Agent:
 
         if self.repo_full or self.settings.github_repo_full():
             try:
-                info = repo_info(self.settings) if self.settings.github_repo_full() else None
                 if self.repo_full and self.repo_full != self.settings.github_repo_full():
-                    # Override owner/repo for this task at runtime.
                     owner, repo = self.repo_full.split("/", 1)
                     self.settings = self.settings.model_copy(
                         update={"github_owner": owner, "github_repo": repo}
@@ -310,63 +384,67 @@ class Agent:
                               f"Clone/pull failed: {res.stderr.strip()[:300]}")
                 else:
                     self.emit(EventType.info,
-                              f"Repository cloned into workspace ({len(ws.list_files())} files).")
+                              f"Repository cloned into workspace "
+                              f"({len(ws.list_files())} files).")
             except GitHubError as exc:
                 self.emit(EventType.error,
-                          f"GitHub unavailable: {exc}. Continuing with empty workspace.")
+                          f"GitHub unavailable: {exc}. "
+                          "Continuing with empty workspace.")
         else:
             self.emit(EventType.info,
                       "No GitHub repo configured; running in local-only workspace.")
 
-        if self._check_cancel(rt):
-            return
+        self._check_cancel(rt)
 
-        # 2) Understand + search.
-        self.emit(EventType.analyzing, "Analyzing task and repository.")
+        # 2) UNDERSTAND — analyze the task.
+        self.emit(EventType.analyzing, "Understanding the task and repository.")
         files = ws.list_files()
-        self.emit(EventType.searching, "Searching repository files.",
-                  count=len(files))
 
-        # 3) Read relevant files (cap to keep context small).
-        relevant = [f for f in files if f.endswith((".py", ".js", ".ts", ".md",
-                    ".txt", ".json", ".yml", ".yaml", ".html", ".css"))]
+        # 3) SEARCH — search the repository.
+        self._check_cancel(rt)
+        self.emit(EventType.searching, "Searching repository files.",
+                  count=len(files), files=files[:50])
+
+        # 4) READ — read relevant files (cap to keep context small).
+        relevant = [f for f in files if f.endswith(
+            (".py", ".js", ".ts", ".md", ".txt", ".json", ".yml", ".yaml",
+             ".html", ".css", ".go", ".rs", ".java"))]
         relevant = relevant[:20]
         file_objs: List[dict] = []
         for f in relevant:
-            if self._check_cancel(rt):
-                return
+            self._check_cancel(rt)
             try:
                 content = ws.read_file(f)
                 file_objs.append({"path": f, "content": content})
-                self.emit(EventType.file_read, f"Reading {f}", path=f)
+                self.emit(EventType.file_read, f"Reading {f}",
+                          path=f, bytes=len(content))
             except WorkspaceError as exc:
                 self.emit(EventType.error, f"Could not read {f}: {exc}")
 
-        # 4) Plan.
+        # 5) PLAN — produce a plan (streamed if a real provider is set).
+        self._check_cancel(rt)
         context = "\n".join(f"### {fo['path']}\n{fo['content'][:1500]}"
                             for fo in file_objs[:10])
-        plan = self.provider.plan(self.description, context)
+        plan = self._plan_with_stream(rt, self.description, context)
         self.emit(EventType.planning, plan.summary, steps=plan.steps)
 
-        if self._check_cancel(rt):
-            return
+        self._check_cancel(rt)
 
-        # 5) Edit files.
-        self.emit(EventType.editing, "Applying edits.")
-        edits = self.provider.edit(self.description, plan, file_objs)
+        # 6) EDIT — apply edits to files.
+        self.emit(EventType.editing, "Applying edits to files.")
+        edits = self._edit_with_stream(rt, self.description, plan, file_objs)
         applied: List[str] = []
         for e in edits:
-            if self._check_cancel(rt):
-                return
+            self._check_cancel(rt)
             try:
-                # Use create_file if new, else write_file (full overwrite).
                 target = ws.safe_path(e["path"])
                 if target.exists():
                     ws.write_file(e["path"], e["content"])
                 else:
                     ws.create_file(e["path"], e["content"])
                 applied.append(e["path"])
-                self.emit(EventType.editing, f"Edited {e['path']}", path=e["path"])
+                self.emit(EventType.editing, f"Edited {e['path']}",
+                          path=e["path"], action="write")
             except WorkspaceError as exc:
                 self.emit(EventType.error, f"Edit failed for {e['path']}: {exc}")
 
@@ -374,25 +452,68 @@ class Agent:
             self.emit(EventType.info,
                       "No automated edits produced for this task; see plan above.")
 
-        # 6) Run verification (with retry on failure).
+        # 7) VERIFY — run verification (with retry on failure).
         self._verify_with_retry(rt, ws, file_objs)
 
-        # 7) Show diff.
+        # 8) Show diff.
+        self._check_cancel(rt)
         diff = ws.git_diff(staged=False)
         self.emit(EventType.info, "Computed git diff.",
                   diff=diff, changed=ws.git_changed_files())
 
-        # 8) Branch -> commit -> push.
-        if self._check_cancel(rt):
-            return
+        # 9) Branch -> commit -> push.
+        self._check_cancel(rt)
         self._git_finalize(rt, ws)
 
+    # ── Planning with streaming ────────────────────────────────────────
+    def _plan_with_stream(self, rt: TaskRuntime, task: str,
+                          context: str) -> Plan:
+        """Produce a plan. If a streaming provider is configured, emit the
+        model's reasoning as ``thinking`` events in real time."""
+        if self._is_streaming_provider:
+            messages = [
+                ChatMessage("system",
+                            "You are a coding agent planning a task. Think "
+                            "briefly about the approach, then output a plan "
+                            "as JSON with keys 'summary' (string) and 'steps' "
+                            "(array of strings). Return ONLY JSON."),
+                ChatMessage("user",
+                            f"Task:\n{task}\n\nContext:\n{context[:6000]}"),
+            ]
+            text = self._stream_ai(messages, context_label="planning")
+            from ai_provider import _parse_plan_json
+            return _parse_plan_json(text, fallback_task=task)
+        # Local provider: no streaming, but still real output.
+        return self.provider.plan(task, context)
+
+    def _edit_with_stream(self, rt: TaskRuntime, task: str, plan: Plan,
+                          file_objs: List[dict]) -> List[dict]:
+        """Produce edits. If a streaming provider is configured, emit the
+        model's reasoning as ``thinking`` events in real time."""
+        if self._is_streaming_provider:
+            files_brief = "\n".join(f["path"] for f in file_objs[:30])
+            messages = [
+                ChatMessage("system",
+                            "You are a coding agent. Given a task and a list "
+                            "of file paths, return a JSON array of edits. "
+                            "Each edit: {\"path\": \"...\", \"content\": "
+                            "\"full new file content\"}. Only include files "
+                            "you actually change. Return ONLY a JSON array."),
+                ChatMessage("user",
+                            f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
+                            f"Files:\n{files_brief}"),
+            ]
+            text = self._stream_ai(messages, context_label="editing")
+            from ai_provider import _parse_edits_json
+            return _parse_edits_json(text)
+        return self.provider.edit(task, plan, file_objs)
+
+    # ── Verification with retry ────────────────────────────────────────
     def _verify_with_retry(self, rt: TaskRuntime, ws: Workspace,
                            file_objs: List[dict]) -> None:
         attempts = 0
         while attempts <= self.MAX_FIX_RETRIES:
-            if self._check_cancel(rt):
-                return
+            self._check_cancel(rt)
             cmd = self._pick_verification_command(ws)
             if not cmd:
                 self.emit(EventType.info,
@@ -400,10 +521,11 @@ class Agent:
                 return
             self.emit(EventType.test_started, f"Running verification: {cmd}",
                       command=cmd)
-            result = tool_run_command(ws, cmd, emit=self.emit)
+            result = tool_run_command(ws, cmd, emit=self.emit, rt=rt)
             self.emit(EventType.test_finished,
                       f"Verification exit code: {result['returncode']}",
-                      success=result["success"], returncode=result["returncode"])
+                      success=result["success"],
+                      returncode=result["returncode"])
             if result["success"]:
                 return
             if result.get("rejected"):
@@ -411,31 +533,41 @@ class Agent:
             attempts += 1
             if attempts > self.MAX_FIX_RETRIES:
                 self.emit(EventType.error,
-                          "Verification failed after retries; stopping fixes.")
+                          "Verification failed after retries; stopping fixes.",
+                          status="failed")
                 return
             self.emit(EventType.fixing, "Analyzing failure and attempting a fix.",
                       attempt=attempts)
-            analysis = self.provider.analyze_error(
-                self.description,
+            analysis = self._analyze_error_with_stream(
+                rt, self.description,
                 result.get("stderr") or result.get("stdout") or "",
-                file_objs,
-            )
+                file_objs)
             self.emit(EventType.fixing, analysis, analysis=analysis)
-            # The local provider's analyze_error may indicate a revert; we
-            # don't auto-revert in the MVP. We simply retry the same command
-            # once more to confirm stability.
+            # Re-run verification once more to confirm stability.
+
+    def _analyze_error_with_stream(self, rt: TaskRuntime, task: str,
+                                   error: str, file_objs: List[dict]) -> str:
+        if self._is_streaming_provider:
+            messages = [
+                ChatMessage("system",
+                            "A verification command failed. In one short "
+                            "sentence, describe the most likely cause and fix."),
+                ChatMessage("user", f"Error:\n{error[:1500]}"),
+            ]
+            return self._stream_ai(messages, context_label="fixing").strip()
+        return self.provider.analyze_error(task, error, file_objs)
 
     def _pick_verification_command(self, ws: Workspace) -> Optional[str]:
-        """Choose a real verification command based on what's in the workspace."""
+        """Choose a real verification command based on workspace contents."""
         files = set(ws.list_files())
-        if "pytest.ini" in files or any(f.startswith("tests/") and f.endswith(".py")
-                                        for f in files) or \
+        if "pytest.ini" in files or any(
+                f.startswith("tests/") and f.endswith(".py") for f in files) or \
            any(f.endswith("conftest.py") for f in files):
             return "python -m pytest -q"
         if "setup.py" in files or "pyproject.toml" in files:
-            return "python -m py_compile " + " ".join(
-                f for f in files if f.endswith(".py") and "/" not in f
-            )[:200] or None
+            py = [f for f in files if f.endswith(".py") and "/" not in f]
+            if py:
+                return "python -m py_compile " + " ".join(py[:10])[:200]
         if "package.json" in files:
             return "npm test"
         if "build.gradle" in files or "build.gradle.kts" in files:
@@ -444,7 +576,6 @@ class Agent:
             return "cargo build"
         if "go.mod" in files:
             return "go build ./..."
-        # Fallback: syntax-check any Python files present.
         py_files = [f for f in files if f.endswith(".py")]
         if py_files:
             sample = py_files[:5]
@@ -464,7 +595,6 @@ class Agent:
         try:
             res = ws.create_branch(branch)
             if not res.success:
-                # Maybe branch exists; just checkout it.
                 ws._git(["checkout", branch])
             rt.branch = branch
             self.emit(EventType.info, f"Created branch {branch}", branch=branch)
@@ -476,19 +606,18 @@ class Agent:
         commit_msg = f"PK Ninja Agent: {self.description[:100]}"
         res = ws.git_commit(commit_msg)
         if res.success:
-            self.emit(EventType.info,
-                      f"Committed: {commit_msg}",
+            self.emit(EventType.info, f"Committed: {commit_msg}",
                       commit=commit_msg, files=changed)
         else:
             self.emit(EventType.error,
                       f"Commit failed: {res.stderr.strip()[:300]}")
             return
 
-        # Push only if a token + repo are configured.
         if self.settings.github_token and self.settings.github_repo_full():
             res = ws.git_push()
             if res.success:
-                self.emit(EventType.info, f"Pushed branch {branch}.", branch=branch)
+                self.emit(EventType.info, f"Pushed branch {branch}.",
+                          branch=branch)
             else:
                 self.emit(EventType.error,
                           f"Push failed: {res.stderr.strip()[:300]}")
@@ -498,7 +627,11 @@ class Agent:
                       "Use the Push button after configuring credentials.")
 
 
-# ── Public API used by main.py ─────────────────────────────────────────────
+class _Cancelled(Exception):
+    """Internal control-flow exception for cancellation."""
+
+
+# ── Public API used by main.py ──────────────────────────────────────────
 def start_task(task_id: str, description: str,
                repo_full: Optional[str] = None) -> TaskRuntime:
     agent = Agent(task_id, description, repo_full=repo_full)
@@ -509,9 +642,19 @@ def start_task(task_id: str, description: str,
 
 
 def cancel_task(task_id: str) -> bool:
+    """Cancel a running task: set the flag and kill any live subprocess."""
     rt = get_runtime(task_id)
     if rt:
         rt.cancel.set()
+        # Kill the currently-running command subprocess, if any.
+        with rt.current_proc_lock:
+            proc = rt.current_proc
+        if proc and proc.poll() is None:
+            try:
+                import os as _os
+                _os.killpg(_os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         return True
     return False
 

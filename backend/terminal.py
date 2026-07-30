@@ -89,6 +89,53 @@ def _strip_env_prefix(command: str) -> str:
     return " ".join(tokens[i:])
 
 
+# Absolute paths the agent may legitimately reference even though they are
+# outside the workspace — e.g. the Python/Node interpreter, the git binary,
+# /dev/null for redirection. These are allowlisted so the containment check
+# does not break normal tooling.
+_ALLOWED_EXTERNAL_ABS = {
+    "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+    "/dev/zero", "/dev/urandom", "/dev/full",
+}
+
+
+def _unsafe_path_refs(command: str) -> List[str]:
+    """Return absolute-path / ``..`` references that escape the workspace.
+
+    Detects any token that is an absolute path (starts with ``/``) other than
+    a small allowlist of device/interpreter paths, or that contains a
+    ``..`` parent traversal. Such references could read or write files
+    outside the sandboxed workspace, so they are blocked.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        # Unparseable — let the later parser report the error.
+        return []
+    unsafe = []
+    for tok in tokens:
+        # Skip env-prefix assignments (VAR=val).
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            continue
+        # Absolute path reference.
+        if tok.startswith("/"):
+            if tok in _ALLOWED_EXTERNAL_ABS:
+                continue
+            # Allow common interpreter binaries invoked by absolute path.
+            if tok in ("/usr/bin/python", "/usr/bin/python3",
+                       "/usr/bin/node", "/usr/bin/git", "/usr/bin/gh",
+                       "/usr/local/bin/python", "/usr/local/bin/python3",
+                       "/usr/local/bin/node", "/usr/local/bin/git"):
+                continue
+            unsafe.append(tok)
+            continue
+        # Parent traversal anywhere in the token.
+        if ".." in tok and ("/../" in tok or tok.startswith("../")
+                            or tok.endswith("/..") or tok == ".."):
+            unsafe.append(tok)
+    return unsafe
+
+
 def _has_unquoted_shell_operator(command: str) -> bool:
     """True if a shell operator appears outside of single/double quotes.
 
@@ -147,6 +194,18 @@ def validate_command(command: str) -> TerminalDecision:
                 False, f"Blocked by safety pattern: {pat.pattern!r}."
             )
 
+    # Sandbox containment: reject absolute paths (outside an allowlist) and
+    # parent-directory traversals so commands cannot read or write files
+    # outside the workspace (e.g. `cat /etc/passwd`, `cat ../../secret`).
+    unsafe = _unsafe_path_refs(command)
+    if unsafe:
+        return TerminalDecision(
+            False,
+            "Command references paths outside the workspace sandbox: "
+            + ", ".join(unsafe[:3])
+            + ". Only workspace-relative paths are allowed.",
+        )
+
     # Identify the program (after any env-prefix assignments).
     body = _strip_env_prefix(command)
     if not body:
@@ -181,11 +240,16 @@ def validate_command(command: str) -> TerminalDecision:
 
 
 def run_command(command: str, workspace: Workspace,
-                timeout: Optional[int] = None) -> CommandResult:
+                timeout: Optional[int] = None,
+                rt: Optional["object"] = None) -> CommandResult:
     """Execute ``command`` inside ``workspace`` and return the real result.
 
     Raises ``TerminalError`` for policy violations. Captures stdout, stderr,
     and exit code truthfully. On timeout, kills the process tree.
+
+    If ``rt`` (a TaskRuntime) is provided, the live ``subprocess.Popen`` handle
+    is stored on it (under ``current_proc``) so a cancel request can kill the
+    running command. This is set/cleared under ``rt.current_proc_lock``.
     """
     decision = validate_command(command)
     if not decision.allowed:
@@ -197,41 +261,67 @@ def run_command(command: str, workspace: Workspace,
 
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
-    # Keep PATH but drop anything that would let commands escape cwd easily.
     env["PWD"] = ws_root
 
+    proc: Optional[subprocess.Popen] = None
+    # Register the process on the runtime so cancel can kill it.
+    if rt is not None:
+        try:
+            with rt.current_proc_lock:
+                rt.current_proc = None  # placeholder; set below once spawned
+        except Exception:
+            pass
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             cwd=ws_root,
-            shell=True,           # needed for env-prefix & glob expansion
-            capture_output=True,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=env,
-            # Prevent the child from receiving SIGINT from the parent.
             start_new_session=True,
         )
+        if rt is not None:
+            with rt.current_proc_lock:
+                rt.current_proc = proc
+        stdout, stderr = proc.communicate(timeout=timeout)
+        returncode = proc.returncode
     except subprocess.TimeoutExpired:
-        return CommandResult(
-            command=command,
-            returncode=124,
-            stdout="",
-            stderr=f"Command timed out after {timeout}s and was killed.",
-        )
+        # Kill the process group and harvest any remaining output.
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+        returncode = 124
+        if stderr == "":
+            stderr = f"Command timed out after {timeout}s and was killed."
     except Exception as exc:  # pragma: no cover - defensive
-        return CommandResult(
-            command=command,
-            returncode=127,
-            stdout="",
-            stderr=f"Failed to start command: {exc}",
-        )
+        returncode = 127
+        stdout, stderr = "", f"Failed to start command: {exc}"
+    finally:
+        if rt is not None:
+            with rt.current_proc_lock:
+                rt.current_proc = None
+
+    # If the task was cancelled mid-run, record it truthfully.
+    cancelled = False
+    if rt is not None and getattr(rt, "cancel", None) and rt.cancel.is_set():
+        cancelled = True
+        if not stderr:
+            stderr = "Command terminated because the task was cancelled."
 
     return CommandResult(
         command=command,
-        returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
+        returncode=returncode,
+        stdout=stdout or "",
+        stderr=stderr or "",
     )
 
 

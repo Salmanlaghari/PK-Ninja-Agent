@@ -7,7 +7,11 @@ def test_health_returns_ok():
     with TestClient(app) as c:
         r = c.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        body = r.json()
+        assert body["status"] == "ok"
+        # v2 reports its version for diagnostics.
+        assert "version" in body
+        assert body["version"] != ""
 
 
 def test_index_html_served():

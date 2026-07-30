@@ -1,6 +1,8 @@
 """Workspace restriction: commands run inside the workspace, not the host."""
 import os
 
+import pytest
+
 from terminal import run_command
 
 
@@ -19,13 +21,12 @@ def test_ls_only_sees_workspace_files(workspace):
 
 
 def test_cannot_list_host_root(workspace):
-    # `ls /` is allowed by program, but it lists the real host root because
-    # the arg is absolute. This test documents that args are NOT rewritten —
-    # the sandbox is enforced via cwd + path-safe file tools, not arg rewrite.
-    # We assert it does NOT list workspace-only files here.
-    res = run_command("ls /", workspace)
-    assert res.returncode == 0
-    assert "marker.txt" not in res.stdout  # workspace marker not at host root
+    # `ls /` references an absolute path outside the workspace. The sandbox
+    # containment rule blocks this so commands cannot escape the workspace.
+    from terminal import TerminalError
+    with pytest.raises(TerminalError) as exc:
+        run_command("ls /", workspace)
+    assert "outside the workspace" in str(exc.value)
 
 
 def test_command_writes_into_workspace(workspace):

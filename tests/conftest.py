@@ -19,6 +19,9 @@ _TMP = Path(tempfile.mkdtemp(prefix="pk_ninja_test_"))
 os.environ.setdefault("WORKSPACE_ROOT", str(_TMP / "workspaces"))
 os.environ.setdefault("DATABASE_PATH", str(_TMP / "test.db"))
 os.environ.setdefault("AI_PROVIDER", "local")
+# Ensure no AI API key leaks into tests (so factory always falls back to local).
+os.environ.pop("AI_API_KEY", None)
+os.environ.pop("GEMINI_API_KEY", None)
 # Ensure no GitHub creds leak into tests.
 os.environ.pop("GITHUB_TOKEN", None)
 os.environ.pop("GITHUB_OWNER", None)
@@ -41,3 +44,14 @@ def ws_root(tmp_path):
 def workspace(ws_root):
     from workspace import Workspace
     return Workspace("test-task-1", root=ws_root)
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache():
+    """Ensure get_settings is re-evaluated per test so env-var changes from
+    one test (e.g. AI_PROVIDER=openai in test_ai_provider) don't leak into
+    later tests via the lru_cache."""
+    from config import get_settings
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()

@@ -1,4 +1,4 @@
-"""FastAPI application: endpoints, SSE streaming, SQLite persistence, static UI.
+"""FastAPI application: endpoints, SSE + WebSocket streaming, SQLite, static UI.
 
 Run:
     uvicorn backend.main:app --reload --port 8000
@@ -8,6 +8,11 @@ Security:
   * All file/path operations go through Workspace.safe_path (traversal guard).
   * Terminal execution is allowlisted and workspace-locked in terminal.py.
   * GitHub ops are server-side only (github.py).
+
+Transport:
+  * SSE  — GET /api/tasks/{task_id}/stream   (EventSource; works everywhere)
+  * WS   — WS  /api/tasks/{task_id}/ws        (WebSocket; lower latency, both ways)
+  The frontend prefers WebSocket and falls back to SSE if WS isn't available.
 """
 from __future__ import annotations
 
@@ -29,24 +34,26 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent import (BUS, TaskRuntime, cancel_task, get_runtime,
                    list_runtimes, new_task_id, start_task)
+from ai_provider import provider_status
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
-from models import (DiffOut, EventOut, EventType, GitBranchRequest,
-                    GitCommitRequest, GitPushRequest, PRPrepareRequest,
-                    TaskCreate, TaskStatus, TaskSummary)
+from models import (ConfigOut, DiffOut, EventOut, EventType,
+                    GitBranchRequest, GitCommitRequest, GitPushRequest,
+                    PRPrepareRequest, TaskCreate, TaskStatus, TaskSummary,
+                    normalize_status)
 from workspace import Workspace, WorkspaceError
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
 
-# ── SQLite persistence ─────────────────────────────────────────────────────
+# ── SQLite persistence ──────────────────────────────────────────────────
 import aiosqlite
 
 _DB_PATH: Optional[Path] = None
@@ -60,34 +67,37 @@ async def _db() -> aiosqlite.Connection:
     conn = await aiosqlite.connect(str(_DB_PATH))
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
+    # Ensure schema exists on every connection (idempotent + defensive).
+    await conn.executescript(_SCHEMA_SQL)
+    await conn.commit()
     return conn
+
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL,
+    repo TEXT,
+    branch TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    data TEXT,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+"""
 
 
 async def init_db() -> None:
     conn = await _db()
     try:
-        await conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                description TEXT NOT NULL,
-                status TEXT NOT NULL,
-                repo TEXT,
-                branch TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                message TEXT NOT NULL,
-                data TEXT,
-                timestamp TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
-            """
-        )
         await conn.commit()
     finally:
         await conn.close()
@@ -100,7 +110,7 @@ async def db_create_task(task_id: str, description: str, repo: Optional[str]) ->
         await conn.execute(
             "INSERT INTO tasks (task_id, description, status, repo, branch, "
             "created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)",
-            (task_id, description, TaskStatus.pending.value, repo, now, now),
+            (task_id, description, TaskStatus.idle.value, repo, now, now),
         )
         await conn.commit()
     finally:
@@ -181,19 +191,19 @@ async def db_list_events(task_id: str) -> List[dict]:
         await conn.close()
 
 
-# ── App ────────────────────────────────────────────────────────────────────
+# ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.1.0")
+app = FastAPI(title="PK Ninja Agent", version="0.2.0")
 
-# Wire event persistence into the bus.
+
+# Wire event persistence into the bus + keep DB task status in sync.
 def _persist(event) -> None:
     try:
         asyncio.run(db_persist_event(event.task_id, event.type.value,
                                      event.message, event.data,
                                      event.timestamp.isoformat() + "Z"))
     except RuntimeError:
-        # No running loop (called from within one) — schedule it.
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.ensure_future(db_persist_event(
@@ -201,6 +211,25 @@ def _persist(event) -> None:
                 event.timestamp.isoformat() + "Z"))
         else:
             raise
+    # Mirror terminal status changes into the tasks table.
+    status_map = {
+        EventType.session_started.value: TaskStatus.running,
+        EventType.completed.value: TaskStatus.success,
+        EventType.cancelled.value: TaskStatus.cancelled,
+    }
+    if event.type.value in status_map:
+        try:
+            asyncio.run(db_update_task_status(
+                event.task_id, status_map[event.type.value],
+                branch=event.data.get("branch")))
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(db_update_task_status(
+                    event.task_id, status_map[event.type.value],
+                    branch=event.data.get("branch")))
+            # else: best-effort; runtime status is authoritative anyway.
+
 
 BUS.set_persist(_persist)
 
@@ -208,16 +237,33 @@ BUS.set_persist(_persist)
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
-    log.info("PK Ninja Agent started. DB at %s", settings.db_path)
+    log.info("PK Ninja Agent v0.2 started. DB at %s", settings.db_path)
 
 
-# ── Health ─────────────────────────────────────────────────────────────────
+# ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
-# ── Repository ─────────────────────────────────────────────────────────────
+# ── Non-secret config (for the frontend) ────────────────────────────────
+@app.get("/api/config")
+async def api_config() -> dict:
+    """Return a non-secret summary of the active AI provider + repo config."""
+    # Read settings fresh so runtime env-var changes are reflected (tests and
+    # hot-reload), rather than the module-level snapshot from import time.
+    fresh = get_settings()
+    ps = provider_status(fresh)
+    return ConfigOut(
+        provider=ps["provider"],
+        model=ps["model"],
+        configured=ps["configured"],
+        streaming_supported=ps["streaming_supported"],
+        repository_configured=bool(fresh.github_repo_full()),
+    ).model_dump()
+
+
+# ── Repository ──────────────────────────────────────────────────────────
 @app.get("/api/repository")
 async def api_repository() -> dict:
     """Return public repo metadata. Never includes tokens."""
@@ -235,11 +281,23 @@ async def api_repository() -> dict:
         return {"configured": False, "error": str(exc)}
 
 
-# ── Tasks ──────────────────────────────────────────────────────────────────
+# ── Tasks ───────────────────────────────────────────────────────────────
+def _runtime_status(task_id: str, row: dict) -> None:
+    """Overlay live runtime status onto a DB row (runtime is authoritative)."""
+    rt = get_runtime(task_id)
+    if rt:
+        row["status"] = rt.status.value
+        if rt.branch:
+            row["branch"] = rt.branch
+    else:
+        row["status"] = normalize_status(row.get("status", "idle"))
+
+
 @app.post("/api/tasks")
 async def api_create_task(body: TaskCreate) -> dict:
     task_id = new_task_id()
-    repo = body.repository or settings.github_repo_full()
+    fresh = get_settings()
+    repo = body.repository or fresh.github_repo_full()
     await db_create_task(task_id, body.description, repo)
     start_task(task_id, body.description, repo_full=repo)
     return {"task_id": task_id, "status": TaskStatus.running.value,
@@ -249,13 +307,8 @@ async def api_create_task(body: TaskCreate) -> dict:
 @app.get("/api/tasks")
 async def api_list_tasks() -> List[dict]:
     rows = await db_list_tasks()
-    # Merge live status from runtime if present.
     for r in rows:
-        rt = get_runtime(r["task_id"])
-        if rt:
-            r["status"] = rt.status.value
-            if rt.branch:
-                r["branch"] = rt.branch
+        _runtime_status(r["task_id"], r)
     return rows
 
 
@@ -264,11 +317,7 @@ async def api_get_task(task_id: str) -> dict:
     row = await db_get_task(task_id)
     if not row:
         raise HTTPException(404, "Task not found")
-    rt = get_runtime(task_id)
-    if rt:
-        row["status"] = rt.status.value
-        if rt.branch:
-            row["branch"] = rt.branch
+    _runtime_status(task_id, row)
     row["events"] = await db_list_events(task_id)
     return row
 
@@ -286,12 +335,11 @@ async def api_task_events(task_id: str) -> List[dict]:
     return await db_list_events(task_id)
 
 
-# ── SSE live event stream ──────────────────────────────────────────────────
+# ── SSE live event stream ───────────────────────────────────────────────
 @app.get("/api/tasks/{task_id}/stream")
 async def api_task_stream(task_id: str, request: Request):
     """Server-Sent Events stream of live agent activity for a task."""
     q = BUS.subscribe(task_id)
-    # Send recent history first.
     history = BUS.history(task_id)
 
     async def event_gen():
@@ -306,13 +354,11 @@ async def api_task_stream(task_id: str, request: Request):
                         None, lambda: q.get(timeout=1.0)
                     )
                     yield f"data: {json.dumps(ev.to_dict())}\n\n"
-                    if ev.type == EventType.completed or ev.type == EventType.error:
-                        # Keep stream open a moment so the client sees the final
-                        # event, then close.
+                    if ev.type in (EventType.completed, EventType.error,
+                                   EventType.cancelled):
                         await asyncio.sleep(0.5)
                         break
                 except queue.Empty:
-                    # No new event; send a comment as keepalive.
                     yield ": keepalive\n\n"
                 except Exception:  # pragma: no cover
                     break
@@ -324,7 +370,75 @@ async def api_task_stream(task_id: str, request: Request):
                                       "X-Accel-Buffering": "no"})
 
 
-# ── Diff ───────────────────────────────────────────────────────────────────
+# ── WebSocket live event stream ─────────────────────────────────────────
+@app.websocket("/api/tasks/{task_id}/ws")
+async def api_task_ws(ws: WebSocket, task_id: str):
+    """WebSocket stream of live agent activity.
+
+    Bidirectional: the client can send ``{"type":"cancel"}`` to cancel the
+    task. Server pushes JSON events as they happen (including streamed
+    ``thinking`` tokens). This is the preferred transport for the frontend.
+    """
+    await ws.accept()
+    q = BUS.subscribe(task_id)
+    # Send recent history first.
+    for ev in BUS.history(task_id):
+        await ws.send_text(json.dumps(ev.to_dict()))
+        if ev.type in (EventType.completed, EventType.error, EventType.cancelled):
+            # Already finished; send history then close.
+            BUS.unsubscribe(task_id, q)
+            await ws.close()
+            return
+
+    loop = asyncio.get_event_loop()
+
+    # Reader: listen for client messages (cancel).
+    async def _reader():
+        try:
+            while True:
+                msg = await ws.receive_text()
+                try:
+                    obj = json.loads(msg)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "cancel":
+                    cancel_task(task_id)
+                    await db_update_task_status(task_id, TaskStatus.cancelled)
+        except WebSocketDisconnect:
+            pass
+        except Exception:  # pragma: no cover
+            pass
+
+    reader_task = asyncio.ensure_future(_reader())
+    try:
+        while True:
+            try:
+                ev = await loop.run_in_executor(None, lambda: q.get(timeout=1.0))
+                await ws.send_text(json.dumps(ev.to_dict()))
+                if ev.type in (EventType.completed, EventType.error,
+                               EventType.cancelled):
+                    await asyncio.sleep(0.3)
+                    break
+            except queue.Empty:
+                # Send a lightweight keepalive ping.
+                try:
+                    await ws.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+            except WebSocketDisconnect:
+                break
+            except Exception:  # pragma: no cover
+                break
+    finally:
+        reader_task.cancel()
+        BUS.unsubscribe(task_id, q)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+# ── Diff ────────────────────────────────────────────────────────────────
 @app.get("/api/diff")
 async def api_diff(task_id: str) -> dict:
     rt = get_runtime(task_id)
@@ -340,7 +454,41 @@ async def api_diff(task_id: str) -> dict:
     ).model_dump()
 
 
-# ── Git controls (explicit user actions) ───────────────────────────────────
+# ── Run a terminal command (real execution, sandboxed) ──────────────────
+class RunCommandRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/tasks/{task_id}/run")
+async def api_run_command(task_id: str, body: RunCommandRequest) -> dict:
+    """Run a real, sandboxed command in the task's workspace.
+
+    This lets the user (or the UI) run a quick command and see real output.
+    The command is validated by terminal.py's allowlist/blocklist and runs
+    with cwd locked to the workspace. Never fakes output.
+    """
+    from terminal import TerminalError, run_command as _run
+    rt = get_runtime(task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    try:
+        result = _run(body.command, rt.workspace, rt=rt)
+        return {
+            "command": body.command,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "success": result.success,
+        }
+    except TerminalError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"command": body.command, "error": str(exc),
+                     "success": False, "returncode": 126},
+        )
+
+
+# ── Git controls (explicit user actions) ────────────────────────────────
 @app.post("/api/git/branch")
 async def api_git_branch(body: GitBranchRequest) -> dict:
     rt = get_runtime(body.task_id)
@@ -383,7 +531,7 @@ async def api_git_push(body: GitPushRequest) -> dict:
             "stdout": res.stdout, "stderr": res.stderr}
 
 
-# ── PR preparation (explicit user action) ──────────────────────────────────
+# ── PR preparation (explicit user action) ───────────────────────────────
 @app.post("/api/pr/prepare")
 async def api_pr_prepare(body: PRPrepareRequest) -> dict:
     rt = get_runtime(body.task_id)
@@ -407,8 +555,9 @@ async def api_pr_create(body: PRPrepareRequest) -> dict:
         raise HTTPException(400, str(exc))
 
 
-# ── Frontend ───────────────────────────────────────────────────────────────
+# ── Frontend ────────────────────────────────────────────────────────────
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+
 
 @app.get("/")
 async def index() -> FileResponse:
