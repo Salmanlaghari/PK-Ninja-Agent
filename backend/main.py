@@ -60,34 +60,38 @@ async def _db() -> aiosqlite.Connection:
     conn = await aiosqlite.connect(str(_DB_PATH))
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
+    # Ensure schema exists on every connection (idempotent + defensive so the
+    # app works even if the startup hook hasn't run yet, e.g. under reload).
+    await conn.executescript(_SCHEMA_SQL)
+    await conn.commit()
     return conn
+
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL,
+    repo TEXT,
+    branch TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    data TEXT,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+"""
 
 
 async def init_db() -> None:
     conn = await _db()
     try:
-        await conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                description TEXT NOT NULL,
-                status TEXT NOT NULL,
-                repo TEXT,
-                branch TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                message TEXT NOT NULL,
-                data TEXT,
-                timestamp TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
-            """
-        )
         await conn.commit()
     finally:
         await conn.close()
