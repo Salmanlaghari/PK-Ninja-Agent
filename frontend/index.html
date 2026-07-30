@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0e14" />
+  <title>PK Ninja Agent</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗡️</text></svg>" />
+<script src="https://sites.super.myninja.ai/_assets/ninja-daytona-script.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <span class="kanji">忍</span>
+        <span class="name">PK <b>NINJA</b><span>coding agent</span></span>
+      </div>
+      <span id="status" class="status-pill idle"><span class="dot"></span><span id="status-text">Idle</span></span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- Repository -->
+    <section class="panel">
+      <div class="panel-head"><span class="ico">⎇</span> Repository</div>
+      <div class="panel-body">
+        <div id="repo-row" class="repo-row">
+          <span class="repo-icon">📦</span>
+          <span id="repo-name" class="repo-name">Not configured</span>
+          <span id="repo-branch" class="repo-branch"></span>
+          <span class="repo-spacer"></span>
+          <span id="repo-badge" class="badge" hidden></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Task input -->
+    <section class="panel">
+      <div class="panel-head"><span class="ico">✦</span> New Task</div>
+      <div class="panel-body">
+        <textarea id="task" class="task-input"
+          placeholder="Describe a coding task, e.g. &#34;Add module docstrings to all Python files&#34; or &#34;Create a README.md describing the project&#34;"></textarea>
+        <button id="start" class="btn primary">⚔️ Start Agent</button>
+      </div>
+    </section>
+
+    <!-- Activity -->
+    <details class="panel" open>
+      <summary>
+        <div class="panel-head"><span class="ico">🥷</span> Agent Activity <span class="chev">›</span></div>
+      </summary>
+      <div class="panel-body">
+        <div id="activity" class="activity">
+          <div class="empty-state">Agent activity will appear here in real time.</div>
+        </div>
+      </div>
+    </details>
+
+    <!-- Terminal -->
+    <details class="panel" open>
+      <summary>
+        <div class="panel-head"><span class="ico">💻</span> Live Terminal <span class="chev">›</span></div>
+      </summary>
+      <div class="panel-body">
+        <div id="terminal" class="terminal"><div class="empty">Terminal output from real command execution will appear here.</div></div>
+      </div>
+    </details>
+
+    <!-- Changed files -->
+    <details class="panel">
+      <summary>
+        <div class="panel-head"><span class="ico">📂</span> Changed Files <span class="chev">›</span></div>
+      </summary>
+      <div class="panel-body">
+        <ul id="files" class="file-list"><li class="empty-state">No changes yet.</li></ul>
+      </div>
+    </details>
+
+    <!-- Diff -->
+    <details class="panel">
+      <summary>
+        <div class="panel-head"><span class="ico">∆</span> Git Diff <span class="chev">›</span></div>
+      </summary>
+      <div class="panel-body">
+        <div id="diff" class="diff"><span class="empty-state">No diff yet.</span></div>
+      </div>
+    </details>
+
+    <!-- Git controls -->
+    <details class="panel">
+      <summary>
+        <div class="panel-head"><span class="ico">⎇</span> Git Controls <span class="chev">›</span></div>
+      </summary>
+      <div class="panel-body git-controls">
+        <input id="branch-name" type="text" placeholder="Branch name (e.g. feat/add-docstrings)" />
+        <div class="btn-row">
+          <button id="btn-branch" class="btn small">Create Branch</button>
+          <button id="btn-commit" class="btn small">Commit</button>
+          <button id="btn-push" class="btn small">Push</button>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button id="btn-pr-prep" class="btn small ghost">Prepare PR</button>
+          <button id="btn-pr-create" class="btn small">Create PR</button>
+        </div>
+        <div id="pr-out" class="empty-state" style="margin-top:10px"></div>
+      </div>
+    </details>
+  </main>
+
+  <div id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
