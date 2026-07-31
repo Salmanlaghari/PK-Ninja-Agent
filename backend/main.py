@@ -34,23 +34,30 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent import (BUS, TaskRuntime, cancel_task, get_runtime,
                    list_runtimes, new_task_id, start_task)
 from ai_provider import provider_status
+from auth import (AuthError, AuthService, InvalidTokenError, User,
+                  get_auth_service, reset_auth_service)
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
-from models import (ConfigOut, DiffOut, EventOut, EventType,
-                    GitBranchRequest, GitCommitRequest, GitPushRequest,
-                    PRPrepareRequest, ProviderActionRequest,
+from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
+                    EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
+                    GitCommitRequest, GitPushRequest, GuestLoginRequest,
+                    LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
-                    ProviderInfoOut, ProviderManagerStatusOut,
-                    TaskCreate, TaskStatus, TaskSummary,
-                    normalize_status)
+                    ProviderInfoOut, ProviderManagerStatusOut, SessionOut,
+                    SettingsOut, SettingsUpdate, SystemHealthComponent,
+                    SystemHealthOut, TaskCreate, TaskStatus, TaskSummary,
+                    UserOut, WorkspaceActionRequest, WorkspaceCreateRequest,
+                    WorkspaceOut, WorkspaceRenameRequest, normalize_status)
 from workspace import Workspace, WorkspaceError
 
 logging.basicConfig(level=logging.INFO)
@@ -253,7 +260,97 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.2.0")
+app = FastAPI(title="PK Ninja Agent", version="0.7.0")
+
+# ── Auth dependency (v0.7.0) ────────────────────────────────────────────────
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> User:
+    """Resolve the current user from the request.
+
+    When ``AUTH_ENABLED=false`` (default) this always returns the anonymous
+    placeholder, so every endpoint remains open (backward compatible). When
+    enabled, a valid session token is required.
+    """
+    svc = get_auth_service(get_settings())
+    authz = credentials.credentials if credentials else None
+    query_session = request.query_params.get("session")
+    try:
+        return svc.require_user_from_request(authz, query_session)
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+def _user_to_out(user: User) -> UserOut:
+    return UserOut(**user.to_dict())
+
+
+# ── Authentication routes (v0.7.0) ──────────────────────────────────────────
+@app.get("/api/auth/status")
+async def auth_status(user: User = Depends(current_user)) -> dict:
+    """Report whether auth is enabled and the current session identity."""
+    svc = get_auth_service(get_settings())
+    return SessionOut(
+        authenticated=svc.enabled,
+        auth_enabled=svc.enabled,
+        user=_user_to_out(user) if user.user_id != "anonymous" else None,
+    ).model_dump()
+
+
+@app.post("/api/auth/guest")
+async def auth_guest(body: GuestLoginRequest) -> dict:
+    """Create a guest session (allowed when AUTH_GUEST_ALLOWED=true)."""
+    svc = get_auth_service(get_settings())
+    if not svc.enabled:
+        # Auth disabled — return a no-op success with the anonymous user so
+        # the frontend can treat it uniformly.
+        return LoginResponse(
+            session="",
+            user=_user_to_out(User("anonymous", "anonymous", "Anonymous")),
+            expires_in=0,
+        ).model_dump()
+    try:
+        user = svc.login_guest(body.display_name)
+    except AuthError as exc:
+        raise HTTPException(403, str(exc))
+    token = svc.create_session(user)
+    ttl = svc._guest_ttl
+    return LoginResponse(session=token, user=_user_to_out(user),
+                         expires_in=ttl).model_dump()
+
+
+@app.post("/api/auth/github")
+async def auth_github(body: GitHubLoginRequest) -> dict:
+    """Sign in with a GitHub token (token verified against /user, not stored)."""
+    svc = get_auth_service(get_settings())
+    if not svc.enabled:
+        raise HTTPException(400, "Authentication is disabled.")
+    try:
+        user = svc.login_github(body.github_token)
+    except AuthError as exc:
+        raise HTTPException(401, str(exc))
+    token = svc.create_session(user)
+    return LoginResponse(session=token, user=_user_to_out(user),
+                         expires_in=svc._user_ttl).model_dump()
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(user: User = Depends(current_user)) -> dict:
+    """Stateless logout — the client discards the token."""
+    svc = get_auth_service(get_settings())
+    # The token isn't passed here (it's in the header); logout is stateless.
+    svc.logout("")
+    return {"success": True}
+
+
+@app.get("/api/me")
+async def api_me(user: User = Depends(current_user)) -> dict:
+    """Return the current user's identity (protected endpoint example)."""
+    return _user_to_out(user).model_dump()
 
 
 # Wire event persistence into the bus + keep DB task status in sync.
@@ -296,13 +393,25 @@ BUS.set_persist(_persist)
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
-    log.info("PK Ninja Agent v0.2 started. DB at %s", settings.db_path)
+    # Run release-prep startup checks (v0.7.0).
+    try:
+        from release_checks import run_startup_checks
+        checks = run_startup_checks(settings)
+        for chk in checks:
+            if chk.get("status") == "warn":
+                log.warning("startup check: %s — %s", chk.get("name"), chk.get("detail"))
+            else:
+                log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
+    except Exception as exc:  # noqa: BLE001 — never block startup on checks
+        log.warning("startup checks skipped: %s", exc)
+    log.info("PK Ninja Agent v0.7.0 started (env=%s). DB at %s",
+             getattr(settings, "app_env", "development"), settings.db_path)
 
 
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.7.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

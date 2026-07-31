@@ -81,6 +81,39 @@ class Settings(BaseSettings):
     # Terminal safety
     command_timeout_seconds: int = Field(default=30, alias="COMMAND_TIMEOUT_SECONDS")
 
+    # ── Authentication (v0.7.0, opt-in) ─────────────────────────────────────
+    # When false (default) no authentication is required — every request is
+    # treated as an anonymous guest. This preserves backward compatibility.
+    auth_enabled: bool = Field(default=False, alias="AUTH_ENABLED")
+    # Allow guest mode (no GitHub login) when auth is enabled.
+    auth_guest_allowed: bool = Field(default=True, alias="AUTH_GUEST_ALLOWED")
+    # Allow "Sign in with GitHub" (token-based verification against /user).
+    auth_github_enabled: bool = Field(default=False, alias="AUTH_GITHUB_ENABLED")
+    # HMAC secret for signing session tokens. If empty, a random per-process
+    # secret is used (sessions won't survive a restart — fine for dev/tests).
+    auth_secret: str = Field(default="", alias="AUTH_SECRET")
+    # Session lifetimes (seconds).
+    auth_guest_ttl_seconds: int = Field(default=14400, alias="AUTH_GUEST_TTL_SECONDS")
+    auth_user_ttl_seconds: int = Field(default=604800, alias="AUTH_USER_TTL_SECONDS")
+
+    # ── User preferences / beta settings (v0.7.0) ───────────────────────────
+    # Default theme: "shinobi" (dark) or "light".
+    default_theme: str = Field(default="shinobi", alias="DEFAULT_THEME")
+    # Auto-save edited files before running commands/tests.
+    auto_save_enabled: bool = Field(default=True, alias="AUTO_SAVE_ENABLED")
+    # Auto-commit after a successful task (optional, off by default).
+    auto_commit_enabled: bool = Field(default=False, alias="AUTO_COMMIT_ENABLED")
+    # In-app notifications for task completion / errors.
+    notifications_enabled: bool = Field(default=True, alias="NOTIFICATIONS_ENABLED")
+
+    # ── Release / deployment (v0.7.0) ───────────────────────────────────────
+    # Environment label: "development" (default), "staging", "production".
+    app_env: str = Field(default="development", alias="APP_ENV")
+    # Debug mode (verbose logging, detailed error pages). Off in production.
+    debug: bool = Field(default=False, alias="DEBUG")
+    # Public site URL (for About / links). Optional.
+    site_url: str = Field(default="", alias="SITE_URL")
+
     # ── Multi-Agent Architecture (opt-in, Phase 9) ────────────────────────────
     # When True, the agent loop delegates orchestration to the AgentCoordinator
     # (agents.coordinator) which runs the 7 specialized agents. Defaults to
