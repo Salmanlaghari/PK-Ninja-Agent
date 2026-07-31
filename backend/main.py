@@ -48,6 +48,7 @@ from auth import (AuthError, AuthService, InvalidTokenError, User,
                   get_auth_service, reset_auth_service)
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
+from settings_store import (get_settings_for_user, update_settings_for_user)
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
@@ -366,6 +367,27 @@ async def auth_logout(user: User = Depends(current_user)) -> dict:
 async def api_me(user: User = Depends(current_user)) -> dict:
     """Return the current user's identity (protected endpoint example)."""
     return _user_to_out(user).model_dump()
+
+
+# ── User settings (v0.7.0) ──────────────────────────────────────────
+@app.get("/api/settings")
+async def get_user_settings(user: User = Depends(current_user)) -> dict:
+    """Return the current user's non-secret preferences.
+
+    Falls back to server config defaults when no persisted preferences
+    exist (so the first call works without any setup).
+    """
+    data = await get_settings_for_user(get_settings(), user)
+    return SettingsOut(**data).model_dump()
+
+
+@app.put("/api/settings")
+async def update_user_settings(body: SettingsUpdate,
+                               user: User = Depends(current_user)) -> dict:
+    """Update the current user's preferences (partial update)."""
+    updates = body.model_dump(exclude_none=True)
+    data = await update_settings_for_user(get_settings(), user, updates)
+    return SettingsOut(**data).model_dump()
 
 
 # Wire event persistence into the bus + keep DB task status in sync.

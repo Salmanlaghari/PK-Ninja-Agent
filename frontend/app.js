@@ -191,6 +191,161 @@ const Auth = (() => {
   };
 })();
 
+/* ============================================================= */
+/* v0.7.0 — Settings panel controller                            */
+/* ============================================================= */
+const Settings = (() => {
+  let current = null;
+
+  const fields = {
+    theme: () => $("set-theme"),
+    ai_provider: () => $("set-provider"),
+    default_workspace: () => $("set-workspace"),
+    "term-shell": () => $("set-term-shell"),
+    "term-font": () => $("set-term-font"),
+    "git-fetch": () => $("set-git-fetch"),
+    "git-sign": () => $("set-git-sign"),
+    "git-branch-prefix": () => $("set-git-branch-prefix"),
+    autosave: () => $("set-autosave"),
+    autocommit: () => $("set-autocommit"),
+    notifications: () => $("set-notifications"),
+  };
+
+  function showStatus(msg, ok) {
+    const el = $("settings-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function populateProviderSelect(providers) {
+    const sel = $("set-provider");
+    if (!sel || !providers) return;
+    const cur = sel.value;
+    sel.innerHTML = "";
+    (providers || []).forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.name; o.textContent = p.name;
+      sel.appendChild(o);
+    });
+    if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+
+  function applyToForm(s) {
+    current = s || {};
+    const setVal = (id, v) => { const el = $(id); if (el) el.value = v ?? ""; };
+    const setChk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+    setVal("set-theme", s.theme);
+    setVal("set-provider", s.ai_provider);
+    setVal("set-workspace", s.default_workspace);
+    const tp = s.terminal_preferences || {};
+    setVal("set-term-shell", tp.shell);
+    setVal("set-term-font", tp.font_size);
+    const gp = s.git_preferences || {};
+    setChk("set-git-fetch", gp.auto_fetch);
+    setChk("set-git-sign", gp.sign_commits);
+    setVal("set-git-branch-prefix", gp.default_branch_prefix);
+    setChk("set-autosave", s.auto_save);
+    setChk("set-autocommit", s.auto_commit);
+    setChk("set-notifications", s.notifications);
+  }
+
+  function collectFromForm() {
+    const val = (id) => { const el = $(id); return el ? el.value : ""; };
+    const chk = (id) => { const el = $(id); return el ? el.checked : false; };
+    return {
+      theme: val("set-theme"),
+      ai_provider: val("set-provider"),
+      default_workspace: val("set-workspace"),
+      terminal_preferences: {
+        shell: val("set-term-shell") || "bash",
+        font_size: parseInt(val("set-term-font") || "13", 10) || 13,
+        scrollback: (current && current.terminal_preferences && current.terminal_preferences.scrollback) || 5000,
+      },
+      git_preferences: {
+        auto_fetch: chk("set-git-fetch"),
+        sign_commits: chk("set-git-sign"),
+        default_branch_prefix: val("set-git-branch-prefix") || "feat/",
+      },
+      auto_save: chk("set-autosave"),
+      auto_commit: chk("set-autocommit"),
+      notifications: chk("set-notifications"),
+    };
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/settings");
+      if (!r.ok) return;
+      const s = await r.json();
+      applyToForm(s);
+      // Populate provider dropdown from the providers list if available.
+      try {
+        const pr = await fetch("/api/providers");
+        if (pr.ok) {
+          const body = await pr.json();
+          populateProviderSelect(body.providers || body);
+        }
+      } catch {}
+    } catch (e) {}
+  }
+
+  async function save() {
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectFromForm()),
+      });
+      if (!r.ok) { showStatus("Save failed (" + r.status + ").", false); return; }
+      const s = await r.json();
+      applyToForm(s);
+      showStatus("Settings saved.", true);
+      // Apply theme immediately if a theme switcher is implemented later.
+    } catch (e) { showStatus("Network error saving settings.", false); }
+  }
+
+  async function reset() {
+    const defaults = {
+      theme: "shinobi", ai_provider: "local", default_workspace: "",
+      terminal_preferences: { shell: "bash", font_size: 13, scrollback: 5000 },
+      git_preferences: { auto_fetch: false, sign_commits: false, default_branch_prefix: "feat/" },
+      auto_save: true, auto_commit: false, notifications: true,
+    };
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(defaults),
+      });
+      if (r.ok) { applyToForm(await r.json()); showStatus("Reset to defaults.", true); }
+    } catch (e) { showStatus("Reset failed.", false); }
+  }
+
+  function open() { const m = $("settings-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("settings-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-settings");
+    const bClose = $("settings-close");
+    const bSave = $("settings-save");
+    const bReset = $("settings-reset");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bSave) bSave.addEventListener("click", save);
+    if (bReset) bReset.addEventListener("click", reset);
+    // Click outside the box closes the modal.
+    const overlay = $("settings-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, save, reset, open, close, applyToForm };
+})();
+
 
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
@@ -1241,6 +1396,7 @@ window.showProviderDetail = showProviderDetail;
 // the app init until a successful login. When auth is disabled (default),
 // everything boots immediately (backward compatible).
 Auth.init();
+Settings.init();
 
 async function bootApp() {
   const enabled = await Auth.checkStatus();
