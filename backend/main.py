@@ -67,7 +67,8 @@ async def _db() -> aiosqlite.Connection:
     conn = await aiosqlite.connect(str(_DB_PATH))
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
-    # Ensure schema exists on every connection (idempotent + defensive).
+    # Ensure schema exists on every connection (idempotent + defensive so the
+    # app works even if the startup hook hasn't run yet, e.g. under reload).
     await conn.executescript(_SCHEMA_SQL)
     await conn.commit()
     return conn
