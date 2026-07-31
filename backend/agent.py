@@ -473,6 +473,18 @@ class Agent:
 
         self._check_cancel(rt)
 
+        # ── Opt-in Multi-Agent Architecture (Phase 9) ───────────────────────
+        # When enabled, the inline UNDERSTAND->PLAN->EDIT->VERIFY loop is
+        # replaced by the AgentCoordinator which drives the 7 specialized
+        # agents (planner, repository, coding, terminal, testing, review,
+        # git) through structured messages. The existing flow remains the
+        # default (multi_agent_enabled defaults to False) so this is fully
+        # non-breaking and the UI/API surface is unchanged — the coordinator
+        # reuses the exact same EventType stream the frontend already renders.
+        if getattr(self.settings, "multi_agent_enabled", False):
+            self._run_via_coordinator(rt, ws)
+            return
+
         # Trigger incremental indexing (Phase 3)
         self.emit(EventType.info, "Indexing repository workspace...")
         try:
@@ -572,6 +584,89 @@ class Agent:
 
         # 4) EXECUTE — Execute plan steps sequentially
         self._execute_plan_steps(rt, ws, file_objs)
+
+    # ── Multi-Agent path (opt-in, Phase 9) ─────────────────────────────────
+    def _run_via_coordinator(self, rt: TaskRuntime, ws: Workspace) -> None:
+        """Delegate the task to the AgentCoordinator and 7 specialized agents.
+
+        This is the opt-in alternative to the inline loop. It builds an
+        :class:`AgentContext` that bundles the *real* workspace, settings,
+        provider, the existing ``emit`` bridge (so the UI keeps rendering the
+        same EventType stream), and ``rt.cancel`` (so cancellation still
+        works). It then runs the coordinator, which routes structured
+        ``AgentMessage`` objects between the specialized agents.
+
+        Security is preserved: every agent that touches the filesystem or
+        runs commands goes through ``ws.safe_path()`` / ``ws.write_file()``
+        and ``terminal.run_command`` / ``validate_command``, exactly the same
+        layers the inline loop uses. Nothing here fakes activity — agents emit
+        real events from real results.
+        """
+        # Local, lazy import so the multi-agent package is only required when
+        # the feature is enabled (keeps the default path dependency-free).
+        from agents import AgentContext, AgentCoordinator, AgentRole
+        # Importing the agent modules registers them with the registry.
+        import agents.planner_agent  # noqa: F401
+        import agents.repository_agent  # noqa: F401
+        import agents.coding_agent  # noqa: F401
+        import agents.terminal_agent  # noqa: F401
+        import agents.testing_agent  # noqa: F401
+        import agents.git_agent  # noqa: F401
+        import agents.review_agent  # noqa: F401
+
+        def _emit(etype: EventType, message: str, **data: Any) -> None:
+            """Bridge agent events into the existing EventBus/UI stream."""
+            self.emit(etype, message, **data)
+
+        ctx = AgentContext(
+            task_id=self.task_id,
+            description=self.description,
+            workspace=ws,
+            settings=self.settings,
+            provider=self.provider,
+            emit=_emit,
+            cancel=rt.cancel,
+        )
+
+        self.emit(EventType.info,
+                  "Multi-Agent Architecture enabled: delegating to the AgentCoordinator.",
+                  agents=[r.value for r in [AgentRole.planner, AgentRole.repository,
+                                            AgentRole.coding, AgentRole.terminal,
+                                            AgentRole.testing, AgentRole.review,
+                                            AgentRole.git]])
+
+        coord = AgentCoordinator()
+        result = coord.execute(ctx)
+
+        # Surface the coordinator's structured plan steps to the UI so the
+        # existing execution-plan panel stays populated and compatible.
+        if ctx.plan:
+            rt.plan_steps = [
+                {"id": i + 1, "description": step.get("description", step.get("summary", str(step))),
+                 "status": "done" if result.success else "pending", "retries": 0}
+                for i, step in enumerate(ctx.plan)
+            ]
+            self.emit(EventType.planning,
+                      "Coordinator produced a multi-agent plan.",
+                      steps=[s.get("description", s.get("summary", str(s))) for s in ctx.plan],
+                      plan_steps=rt.plan_steps)
+
+        # Propagate the branch created by the Git agent (if any) so the UI's
+        # Push button and the completion event carry the right branch name.
+        branch = (ctx.scratch.get("git", {}) or {}).get("branch")
+        if branch:
+            rt.branch = branch
+
+        if not result.success:
+            # Raise so the outer run() handler sets TaskStatus.failed and
+            # emits an honest error event — never fake success.
+            raise RuntimeError(result.summary or "Multi-agent orchestration did not complete.")
+
+        self.emit(EventType.info,
+                  result.summary or "Multi-agent orchestration completed.",
+                  branch=rt.branch, status="success",
+                  iterations=result.data.get("iterations"),
+                  fix_rounds=result.data.get("fix_rounds"))
 
     def _execute_plan_steps(self, rt: TaskRuntime, ws: Workspace, file_objs: List[dict]) -> None:
         import json
