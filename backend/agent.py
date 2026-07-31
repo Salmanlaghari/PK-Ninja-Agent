@@ -363,7 +363,7 @@ class Agent:
 
     def _loop(self, rt: TaskRuntime) -> None:
         # 1) Set up workspace + connect to repo.
-        ws = Workspace(self.task_id, settings=self.settings)
+        ws = Workspace(self.task_id, settings=self.settings, repo_full=self.repo_full)
         rt.workspace = ws
         self.emit(EventType.info, "Workspace ready.",
                   workspace=str(ws.root))
@@ -396,6 +396,34 @@ class Agent:
 
         self._check_cancel(rt)
 
+        # Trigger incremental indexing (Phase 3)
+        self.emit(EventType.info, "Indexing repository workspace...")
+        try:
+            import asyncio
+            import aiosqlite
+            from indexing import index_workspace
+            async def _run_idx():
+                async with aiosqlite.connect(self.settings.database_path) as conn:
+                    # Ensure tables exist
+                    await conn.executescript(
+                        "CREATE TABLE IF NOT EXISTS repo_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, mtime REAL NOT NULL, indexed_at TEXT NOT NULL, UNIQUE(task_id, path));"
+                        "CREATE TABLE IF NOT EXISTS repo_symbols (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, symbol_name TEXT NOT NULL, symbol_type TEXT NOT NULL, line_no INTEGER NOT NULL);"
+                    )
+                    await conn.commit()
+                    return await index_workspace(self.task_id, ws, conn)
+
+            try:
+                stats = asyncio.run(_run_idx())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                stats = loop.run_until_complete(_run_idx())
+                loop.close()
+
+            self.emit(EventType.info, f"Repository indexed: {stats['total']} files, "
+                      f"{stats['added']} added, {stats['updated']} updated, {stats['deleted']} deleted.")
+        except Exception as exc:
+            self.emit(EventType.error, f"Indexing failed: {exc}")
+
         # 2) UNDERSTAND — analyze the task.
         self.emit(EventType.analyzing, "Understanding the task and repository.")
         files = ws.list_files()
@@ -423,8 +451,30 @@ class Agent:
 
         # 5) PLAN — produce a plan (streamed if a real provider is set).
         self._check_cancel(rt)
+
+        # Build project map text representation (Phase 3)
+        project_map_str = ""
+        try:
+            import asyncio
+            import aiosqlite
+            from indexing import get_project_map
+            async def _get_map():
+                async with aiosqlite.connect(self.settings.database_path) as conn:
+                    return await get_project_map(self.task_id, ws, conn)
+            try:
+                project_map_str = asyncio.run(_get_map())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                project_map_str = loop.run_until_complete(_get_map())
+                loop.close()
+        except Exception:
+            pass
+
         context = "\n".join(f"### {fo['path']}\n{fo['content'][:1500]}"
                             for fo in file_objs[:10])
+        if project_map_str:
+            context = project_map_str + "\n\n" + context
+
         plan = self._plan_with_stream(rt, self.description, context)
         self.emit(EventType.planning, plan.summary, steps=plan.steps)
 

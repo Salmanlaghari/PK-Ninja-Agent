@@ -92,6 +92,27 @@ CREATE TABLE IF NOT EXISTS events (
     timestamp TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+
+CREATE TABLE IF NOT EXISTS repo_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    indexed_at TEXT NOT NULL,
+    UNIQUE(task_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_files_task ON repo_files(task_id);
+
+CREATE TABLE IF NOT EXISTS repo_symbols (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    symbol_name TEXT NOT NULL,
+    symbol_type TEXT NOT NULL,
+    line_no INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_symbols_task ON repo_symbols(task_id);
 """
 
 
@@ -438,6 +459,57 @@ async def api_task_ws(ws: WebSocket, task_id: str):
             pass
 
 
+# ── Repository Intelligence (Phase 3) ───────────────────────────────────
+@app.post("/api/tasks/{task_id}/index")
+async def api_index_task(task_id: str) -> dict:
+    """Manually trigger or rerun incremental indexing for a task's workspace."""
+    rt = get_runtime(task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+
+    from indexing import index_workspace
+    conn = await _db()
+    try:
+        results = await index_workspace(task_id, rt.workspace, conn)
+        return {"task_id": task_id, "success": True, "results": results}
+    finally:
+        await conn.close()
+
+
+@app.get("/api/tasks/{task_id}/tree")
+async def api_task_tree(task_id: str) -> List[dict]:
+    """Retrieve the visual folder and file structure, including class/func symbols."""
+    rt = get_runtime(task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+
+    from indexing import build_tree_nodes, index_workspace
+    conn = await _db()
+    try:
+        # Run automatic indexing first to ensure tree is up-to-date
+        await index_workspace(task_id, rt.workspace, conn)
+        tree = await build_tree_nodes(task_id, rt.workspace, conn)
+        return tree
+    finally:
+        await conn.close()
+
+
+@app.get("/api/tasks/{task_id}/symbols")
+async def api_task_symbols(task_id: str, q: str = "") -> List[dict]:
+    """Search symbols (classes/functions/imports) within a task's indexed repository."""
+    rt = get_runtime(task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+
+    from indexing import search_symbols
+    conn = await _db()
+    try:
+        results = await search_symbols(task_id, q, conn)
+        return results
+    finally:
+        await conn.close()
+
+
 # ── Diff ────────────────────────────────────────────────────────────────
 @app.get("/api/diff")
 async def api_diff(task_id: str) -> dict:
@@ -489,6 +561,87 @@ async def api_run_command(task_id: str, body: RunCommandRequest) -> dict:
 
 
 # ── Git controls (explicit user actions) ────────────────────────────────
+class GitCheckoutRequest(BaseModel):
+    task_id: str
+    branch: str
+    create: bool = False
+
+class GitStageFileRequest(BaseModel):
+    task_id: str
+    path: str
+
+class GitUnstageFileRequest(BaseModel):
+    task_id: str
+    path: str
+
+class GitDiscardFileRequest(BaseModel):
+    task_id: str
+    path: str
+
+@app.get("/api/git/branches")
+async def api_git_list_branches(task_id: str) -> dict:
+    rt = get_runtime(task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    ws = rt.workspace
+    try:
+        branches = ws.git_list_branches()
+        current = ws.git_current_branch() or "HEAD"
+        return {"task_id": task_id, "branches": branches, "current": current}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/git/checkout")
+async def api_git_checkout(body: GitCheckoutRequest) -> dict:
+    rt = get_runtime(body.task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    ws = rt.workspace
+    try:
+        res = ws.git_checkout(body.branch, create=body.create)
+        if res.success:
+            rt.branch = body.branch
+            await db_update_task_status(body.task_id, rt.status, branch=body.branch)
+        return {"success": res.success, "branch": body.branch, "stdout": res.stdout, "stderr": res.stderr}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/git/stage")
+async def api_git_stage(body: GitStageFileRequest) -> dict:
+    rt = get_runtime(body.task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    ws = rt.workspace
+    try:
+        res = ws.git_stage_file(body.path)
+        return {"success": res.success, "path": body.path, "stdout": res.stdout, "stderr": res.stderr}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/git/unstage")
+async def api_git_unstage(body: GitUnstageFileRequest) -> dict:
+    rt = get_runtime(body.task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    ws = rt.workspace
+    try:
+        res = ws.git_unstage_file(body.path)
+        return {"success": res.success, "path": body.path, "stdout": res.stdout, "stderr": res.stderr}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/git/discard")
+async def api_git_discard(body: GitDiscardFileRequest) -> dict:
+    rt = get_runtime(body.task_id)
+    if not rt or not rt.workspace:
+        raise HTTPException(404, "Task workspace not found")
+    ws = rt.workspace
+    try:
+        res = ws.git_discard_file(body.path)
+        return {"success": res.success, "path": body.path, "stdout": res.stdout, "stderr": res.stderr}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
 @app.post("/api/git/branch")
 async def api_git_branch(body: GitBranchRequest) -> dict:
     rt = get_runtime(body.task_id)
