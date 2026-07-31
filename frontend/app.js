@@ -347,6 +347,193 @@ const Settings = (() => {
 })();
 
 
+/* ============================================================= */
+/* v0.7.0 — Workspaces panel controller                          */
+/* ============================================================= */
+const Workspaces = (() => {
+  function showStatus(msg, ok) {
+    const el = $("ws-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function fmtSize(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(i ? 1 : 0) + " " + u[i];
+  }
+
+  function renderItem(w) {
+    const row = document.createElement("div");
+    row.className = "ws-item";
+    const name = document.createElement("span");
+    name.className = "ws-name";
+    name.textContent = w.name;
+    row.appendChild(name);
+    if (w.is_default) {
+      const tag = document.createElement("span");
+      tag.className = "ws-default-tag";
+      tag.textContent = "default";
+      row.appendChild(tag);
+    }
+    if (w.is_git_repo) {
+      const gt = document.createElement("span");
+      gt.className = "ws-git-tag";
+      gt.textContent = "git" + (w.branch ? ":" + w.branch : "");
+      row.appendChild(gt);
+    }
+    const meta = document.createElement("span");
+    meta.className = "ws-meta";
+    meta.textContent = w.file_count + " files · " + fmtSize(w.size_bytes);
+    row.appendChild(meta);
+
+    const btnSwitch = document.createElement("button");
+    btnSwitch.className = "btn ghost btn-tiny";
+    btnSwitch.textContent = "Switch";
+    btnSwitch.addEventListener("click", () => switchWs(w.name));
+    row.appendChild(btnSwitch);
+
+    const btnRename = document.createElement("button");
+    btnRename.className = "btn ghost btn-tiny";
+    btnRename.textContent = "Rename";
+    btnRename.addEventListener("click", () => renameWs(w.name));
+    row.appendChild(btnRename);
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "btn ghost btn-tiny";
+    btnDel.textContent = "Delete";
+    btnDel.addEventListener("click", () => deleteWs(w.name));
+    row.appendChild(btnDel);
+    return row;
+  }
+
+  function renderList(containerId, items) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!items || items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ws-empty";
+      empty.textContent = "No workspaces yet.";
+      el.appendChild(empty);
+      return;
+    }
+    items.forEach(w => el.appendChild(renderItem(w)));
+  }
+
+  async function load() {
+    try {
+      const [lr, rr] = await Promise.all([
+        fetch("/api/workspaces"),
+        fetch("/api/workspaces/recent"),
+      ]);
+      if (lr.ok) {
+        const body = await lr.json();
+        renderList("ws-list", body.workspaces || []);
+      }
+      if (rr.ok) {
+        const body = await rr.json();
+        renderList("ws-recent-list", body.workspaces || []);
+      }
+    } catch (e) { showStatus("Failed to load workspaces.", false); }
+  }
+
+  async function createWs() {
+    const name = $("ws-new-name").value.trim();
+    const repo = $("ws-new-repo").value.trim();
+    if (!name) { showStatus("Enter a workspace name.", false); return; }
+    try {
+      const r = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, repo: repo || null }),
+      });
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Create failed (" + r.status + ").", false);
+        return;
+      }
+      $("ws-new-name").value = "";
+      $("ws-new-repo").value = "";
+      showStatus("Workspace created.", true);
+      load();
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  async function switchWs(name) {
+    try {
+      const r = await fetch("/api/workspaces/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (r.ok) { showStatus("Switched to " + name + ".", true); load(); }
+      else { showStatus("Switch failed.", false); }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  function renameWs(oldName) {
+    const newName = prompt("Rename workspace to:", oldName);
+    if (!newName || newName.trim() === oldName) return;
+    doRename(oldName, newName.trim());
+  }
+
+  async function doRename(oldName, newName) {
+    try {
+      const r = await fetch("/api/workspaces", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_name: oldName, new_name: newName }),
+      });
+      if (r.ok) { showStatus("Renamed to " + newName + ".", true); load(); }
+      else {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Rename failed.", false);
+      }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  async function deleteWs(name) {
+    if (!confirm("Delete workspace '" + name + "'? This cannot be undone.")) return;
+    try {
+      const r = await fetch("/api/workspaces/" + encodeURIComponent(name), { method: "DELETE" });
+      if (r.ok) { showStatus("Deleted " + name + ".", true); load(); }
+      else {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Delete failed.", false);
+      }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  function open() { const m = $("workspaces-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("workspaces-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-workspaces");
+    const bClose = $("workspaces-close");
+    const bCreate = $("ws-create-btn");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bCreate) bCreate.addEventListener("click", createWs);
+    const overlay = $("workspaces-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    const nameInput = $("ws-new-name");
+    if (nameInput) nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") createWs();
+    });
+  }
+
+  return { init, load, open, close };
+})();
+
+
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
 let evtSource = null;     // SSE fallback connection
@@ -1397,6 +1584,7 @@ window.showProviderDetail = showProviderDetail;
 // everything boots immediately (backward compatible).
 Auth.init();
 Settings.init();
+Workspaces.init();
 
 async function bootApp() {
   const enabled = await Auth.checkStatus();

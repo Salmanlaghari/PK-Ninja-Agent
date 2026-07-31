@@ -1156,3 +1156,37 @@ header {
 }
 .settings-status.ok { background: rgba(16,185,129,0.1); color: var(--ok); border: 1px solid rgba(16,185,129,0.4); }
 .settings-status.err { background: rgba(239,68,68,0.08); color: var(--err); border: 1px solid rgba(239,68,68,0.4); }
+
+/* Workspace Manager (v0.7.0) */
+.ws-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  background: rgba(0,0,0,0.12);
+}
+.ws-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.ws-item + .ws-item { border-top: 1px solid rgba(255,255,255,0.05); }
+.ws-item .ws-name { flex: 1; font-weight: 600; }
+.ws-item .ws-meta { font-size: 11px; opacity: 0.65; }
+.ws-item .ws-default-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: rgba(16,185,129,0.15); color: var(--ok);
+  border: 1px solid rgba(16,185,129,0.3);
+}
+.ws-item .ws-git-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: rgba(168,85,247,0.15); color: #c084fc;
+  border: 1px solid rgba(168,85,247,0.3);
+}
+.ws-item button { padding: 2px 8px; font-size: 11px; }
+.ws-empty { padding: 14px; text-align: center; opacity: 0.55; font-size: 12px; }
+.settings-inline { flex: 1; min-width: 0; }

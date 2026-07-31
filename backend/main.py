@@ -49,6 +49,10 @@ from auth import (AuthError, AuthService, InvalidTokenError, User,
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
+from workspace_manager import (WorkspaceManagerError, create_workspace,
+                               delete_workspace, list_workspaces,
+                               recent_workspaces, rename_workspace,
+                               switch_workspace)
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
@@ -388,6 +392,67 @@ async def update_user_settings(body: SettingsUpdate,
     updates = body.model_dump(exclude_none=True)
     data = await update_settings_for_user(get_settings(), user, updates)
     return SettingsOut(**data).model_dump()
+
+
+# ── Workspace Manager routes (v0.7.0) ────────────────────────────────────────
+@app.get("/api/workspaces")
+async def api_list_workspaces(user: User = Depends(current_user)) -> dict:
+    """List all workspaces under the configured root."""
+    items = await list_workspaces(get_settings())
+    return {"workspaces": [WorkspaceOut(**w).model_dump() for w in items]}
+
+
+@app.get("/api/workspaces/recent")
+async def api_recent_workspaces(user: User = Depends(current_user)) -> dict:
+    """Return recently-accessed workspaces."""
+    items = await recent_workspaces(get_settings(), limit=10)
+    return {"workspaces": [WorkspaceOut(**w).model_dump() for w in items]}
+
+
+@app.post("/api/workspaces")
+async def api_create_workspace(body: WorkspaceCreateRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Create a new workspace (optionally cloning a GitHub repo)."""
+    try:
+        item = await create_workspace(get_settings(), body.name,
+                                      repo=body.repo)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.put("/api/workspaces")
+async def api_rename_workspace(body: WorkspaceRenameRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Rename an existing workspace."""
+    try:
+        item = await rename_workspace(get_settings(), body.old_name,
+                                      body.new_name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.delete("/api/workspaces/{name}")
+async def api_delete_workspace(name: str,
+                               user: User = Depends(current_user)) -> dict:
+    """Delete a workspace directory (recursive)."""
+    try:
+        item = await delete_workspace(get_settings(), name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.post("/api/workspaces/switch")
+async def api_switch_workspace(body: WorkspaceActionRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Mark a workspace as active (records recent access)."""
+    try:
+        item = await switch_workspace(get_settings(), body.name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
 
 
 # Wire event persistence into the bus + keep DB task status in sync.
