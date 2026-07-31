@@ -1190,3 +1190,56 @@ header {
 .ws-item button { padding: 2px 8px; font-size: 11px; }
 .ws-empty { padding: 14px; text-align: center; opacity: 0.55; font-size: 12px; }
 .settings-inline { flex: 1; min-width: 0; }
+
+/* Provider Manager Modal (v0.7.0 Phase 4) */
+.pm-summary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 8px 4px;
+}
+.pm-summary-item { display: flex; flex-direction: column; gap: 2px; }
+.pm-summary-label { font-size: 10px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.5px; }
+.pm-summary-value { font-weight: 600; font-size: 14px; }
+.pm-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  background: rgba(0,0,0,0.12);
+}
+.pm-card {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.pm-card + .pm-card { border-top: 1px solid rgba(255,255,255,0.05); }
+.pm-card:hover { background: rgba(88,166,255,0.06); }
+.pm-card.active { background: rgba(88,166,255,0.10); }
+.pm-card-head { display: flex; align-items: center; gap: 8px; }
+.pm-card-name { font-weight: 600; font-size: 13px; flex: 1; }
+.pm-card.disabled .pm-card-name { opacity: 0.5; }
+.pm-card-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.pm-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: rgba(255,255,255,0.06); color: inherit;
+}
+.pm-tag.requires-key { background: rgba(234,179,8,0.15); color: #d29922; }
+.pm-detail {
+  margin-top: 6px;
+  padding: 12px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: var(--radius-sm);
+  background: rgba(0,0,0,0.12);
+  min-height: 60px;
+}
+.pm-detail .cap-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+  margin: 8px 0;
+}
+.pm-detail .cap-item { font-size: 12px; }
+.pm-detail .cap-yes { color: #3fb950; }
+.pm-detail .cap-no { color: #f85149; }
+.pm-detail .provider-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }

@@ -25,6 +25,7 @@
         <span id="status" class="status-pill idle"><span class="dot"></span><span id="status-text">Idle</span></span>
         <button id="btn-settings" class="btn btn-tiny ghost header-btn" title="Settings">&#9881; Settings</button>
         <button id="btn-workspaces" class="btn btn-tiny ghost header-btn" title="Workspaces">&#128193; Workspaces</button>
+        <button id="btn-providers" class="btn btn-tiny ghost header-btn" title="AI Providers">&#129302; Providers</button>
         <span id="user-menu" class="user-menu" hidden>
           <span id="user-avatar" class="user-avatar"></span>
           <span id="user-name" class="user-name">Guest</span>
@@ -209,6 +210,46 @@
       </div>
       <div class="modal-body">
         <pre><code id="modal-content"></code></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Provider Manager Modal (v0.7.0 Phase 4) -->
+  <div id="providers-modal" class="modal-overlay" hidden>
+    <div class="modal-box settings-box">
+      <div class="modal-head">
+        <span>&#129302; AI Providers</span>
+        <button id="providers-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body settings-body">
+        <div class="settings-group">
+          <div class="pm-summary">
+            <div class="pm-summary-item">
+              <span class="pm-summary-label">Active</span>
+              <span id="pm-active" class="pm-summary-value">—</span>
+            </div>
+            <div class="pm-summary-item">
+              <span class="pm-summary-label">Health</span>
+              <span id="pm-active-health" class="provider-health-pill unknown">unknown</span>
+            </div>
+            <div class="pm-summary-item">
+              <span class="pm-summary-label">Manager</span>
+              <span id="pm-enabled" class="pm-summary-value">disabled</span>
+            </div>
+            <button id="pm-refresh" class="btn ghost btn-tiny">&#8635; Refresh</button>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Installed Providers</label>
+          <div id="pm-list" class="pm-list"></div>
+        </div>
+
+        <div id="pm-detail" class="pm-detail ws-empty">
+          Select a provider to view details.
+        </div>
+
+        <div id="pm-status" class="settings-status" hidden></div>
       </div>
     </div>
   </div>

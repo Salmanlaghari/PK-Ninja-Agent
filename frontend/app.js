@@ -534,6 +534,187 @@ const Workspaces = (() => {
 })();
 
 
+/* ============================================================= */
+/* v0.7.0 — Provider Manager panel controller                    */
+/* ============================================================= */
+const Providers = (() => {
+  let state = null;
+
+  function showStatus(msg, ok) {
+    const el = $("pm-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function capYes(v) {
+    return v ? '<span class="cap-yes">&#10003;</span>' : '<span class="cap-no">&#10007;</span>';
+  }
+
+  function renderCard(name, p) {
+    const card = document.createElement("div");
+    card.className = "pm-card" + (name === state.active ? " active" : "") + (p.enabled ? "" : " disabled");
+    const head = document.createElement("div");
+    head.className = "pm-card-head";
+    const nm = document.createElement("span");
+    nm.className = "pm-card-name";
+    nm.textContent = p.display_name || name;
+    head.appendChild(nm);
+    const st = document.createElement("span");
+    const hstatus = (p.health && p.health.status) || "unknown";
+    st.className = "provider-row-status " + hstatus;
+    st.textContent = hstatus;
+    head.appendChild(st);
+    if (name === state.active) {
+      const at = document.createElement("span");
+      at.className = "pm-tag";
+      at.style.background = "rgba(88,166,255,0.18)";
+      at.style.color = "#58a6ff";
+      at.textContent = "active";
+      head.appendChild(at);
+    }
+    card.appendChild(head);
+
+    const tags = document.createElement("div");
+    tags.className = "pm-card-tags";
+    if (p.requires_api_key) {
+      const t = document.createElement("span");
+      t.className = "pm-tag requires-key";
+      t.textContent = "requires API key";
+      tags.appendChild(t);
+    }
+    if (!p.enabled) {
+      const t = document.createElement("span");
+      t.className = "pm-tag";
+      t.textContent = "disabled";
+      tags.appendChild(t);
+    }
+    const cap = p.capability || {};
+    if (cap.streaming) {
+      const t = document.createElement("span"); t.className = "pm-tag"; t.textContent = "streaming";
+      tags.appendChild(t);
+    }
+    if (cap.tool_calling) {
+      const t = document.createElement("span"); t.className = "pm-tag"; t.textContent = "tools";
+      tags.appendChild(t);
+    }
+    card.appendChild(tags);
+
+    card.addEventListener("click", () => renderDetail(name));
+    return card;
+  }
+
+  function renderDetail(name) {
+    const detail = $("pm-detail");
+    if (!state || !state.providers || !state.providers[name]) {
+      detail.className = "pm-detail ws-empty";
+      detail.textContent = "Select a provider to view details.";
+      return;
+    }
+    const p = state.providers[name];
+    const cap = p.capability || {};
+    const health = p.health || {};
+    const isActive = (name === state.active);
+    detail.className = "pm-detail";
+    detail.innerHTML =
+      `<div><b>${p.display_name || name}</b> <span style="opacity:0.5;font-size:12px">(${name})</span></div>` +
+      `<div style="margin-top:4px;font-size:12px;opacity:0.8">${p.description || ""}</div>` +
+      `<div class="cap-grid" style="margin-top:8px">` +
+        `<div class="cap-item">${capYes(cap.streaming)} Streaming</div>` +
+        `<div class="cap-item">${capYes(cap.tool_calling)} Tool calling</div>` +
+        `<div class="cap-item">${capYes(cap.code_editing)} Code editing</div>` +
+        `<div class="cap-item">CTX: ${cap.context_window != null ? cap.context_window : "?"}</div>` +
+      `</div>` +
+      `<div style="margin-top:6px;font-size:12px">Health: <b>${health.status || "unknown"}</b> · ` +
+      `errors: ${health.error_count || 0} · successes: ${health.success_count || 0}` +
+      (health.avg_response_time_ms != null ? ` · avg ${health.avg_response_time_ms}ms` : "") + `</div>` +
+      `<div class="provider-actions">` +
+        (isActive ? "" : `<button class="btn small" onclick="Providers.setActive('${name}')">Set Active</button>`) +
+        (p.enabled ? `<button class="btn small ghost" onclick="Providers.toggle('${name}', false)">Disable</button>`
+                   : `<button class="btn small" onclick="Providers.toggle('${name}', true)">Enable</button>`) +
+        `<button class="btn small ghost" onclick="Providers.probe('${name}')">Health Check</button>` +
+      `</div>`;
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/providers");
+      if (!r.ok) { showStatus("Failed to load providers.", false); return; }
+      state = await r.json();
+      $("pm-active").textContent = state.active || "—";
+      const hs = (state.active_health && state.active_health.status) || "unknown";
+      const hp = $("pm-active-health");
+      hp.textContent = hs;
+      hp.className = "provider-health-pill " + hs;
+      $("pm-enabled").textContent = state.enabled ? "enabled" : "disabled";
+      const list = $("pm-list");
+      list.innerHTML = "";
+      const names = Object.keys(state.providers || {});
+      if (!names.length) {
+        const e = document.createElement("div");
+        e.className = "ws-empty";
+        e.textContent = "No providers registered.";
+        list.appendChild(e);
+        return;
+      }
+      names.forEach(n => list.appendChild(renderCard(n, state.providers[n])));
+    } catch (e) { showStatus("Network error loading providers.", false); }
+  }
+
+  async function setActive(name) {
+    try {
+      await fetch("/api/providers/active", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await load(); loadProvider();
+      showStatus("Active provider set to " + name + ".", true);
+    } catch (e) { showStatus("Failed to set active provider.", false); }
+  }
+
+  async function toggle(name, enable) {
+    try {
+      const url = "/api/providers/" + (enable ? "enable" : "disable");
+      await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await load();
+      showStatus((enable ? "Enabled " : "Disabled ") + name + ".", true);
+    } catch (e) { showStatus("Failed to toggle provider.", false); }
+  }
+
+  async function probe(name) {
+    try {
+      await fetch(`/api/providers/${name}/health`);
+      await load(); renderDetail(name);
+      showStatus("Health check complete.", true);
+    } catch (e) { showStatus("Health check failed.", false); }
+  }
+
+  function open() { const m = $("providers-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("providers-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-providers");
+    const bClose = $("providers-close");
+    const bRefresh = $("pm-refresh");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bRefresh) bRefresh.addEventListener("click", load);
+    const overlay = $("providers-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, open, close, setActive, toggle, probe };
+})();
+window.Providers = window.Providers || {};
+
+
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
 let evtSource = null;     // SSE fallback connection
@@ -1585,6 +1766,7 @@ window.showProviderDetail = showProviderDetail;
 Auth.init();
 Settings.init();
 Workspaces.init();
+Providers.init();
 
 async function bootApp() {
   const enabled = await Auth.checkStatus();
