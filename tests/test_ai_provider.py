@@ -271,3 +271,69 @@ def test_local_provider_satisfies_protocol():
     from ai_provider import AIProvider
     p = LocalProvider()
     assert isinstance(p, AIProvider)
+
+
+def test_factory_returns_anthropic_provider(monkeypatch):
+    from config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("AI_PROVIDER", "anthropic")
+    monkeypatch.setenv("AI_API_KEY", "ant-key")
+    get_settings.cache_clear()
+    p = get_provider()
+    from ai_provider import AnthropicProvider
+    assert isinstance(p, AnthropicProvider)
+    assert p.name == "anthropic"
+
+
+def test_factory_returns_jules_provider(monkeypatch):
+    from config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("AI_PROVIDER", "jules")
+    monkeypatch.setenv("AI_API_KEY", "jules-key")
+    get_settings.cache_clear()
+    p = get_provider()
+    from ai_provider import JulesProvider
+    assert isinstance(p, JulesProvider)
+    assert p.name == "jules"
+
+
+def test_anthropic_provider_stream_chat_parses_messages(monkeypatch):
+    from config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("AI_PROVIDER", "anthropic")
+    monkeypatch.setenv("AI_API_KEY", "ant-key")
+    get_settings.cache_clear()
+    from ai_provider import AnthropicProvider
+    provider = AnthropicProvider(get_settings())
+
+    sse_lines = [
+        'data: {"type": "content_block_delta", "delta": {"text": "Hello"}}',
+        'data: {"type": "content_block_delta", "delta": {"text": " Claude"}}',
+        'data: {"type": "message_stop"}',
+    ]
+
+    class FakeResponse:
+        def __init__(self):
+            self.headers = {"content-type": "text/event-stream"}
+        def read(self): pass
+        def iter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class FakeStreamCtx:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return FakeResponse()
+        def __exit__(self, *a): return False
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def stream(self, *a, **kw): return FakeStreamCtx()
+
+    with patch("ai_provider.httpx.Client", FakeClient):
+        tokens: List[str] = []
+        result = provider.stream_chat(
+            [ChatMessage("user", "hi")], on_token=lambda t: tokens.append(t))
+    assert result.text == "Hello Claude"
+    assert tokens == ["Hello", " Claude"]

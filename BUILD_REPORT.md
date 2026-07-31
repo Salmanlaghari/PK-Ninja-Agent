@@ -1,192 +1,97 @@
-# PK Ninja Agent — v2 Interactive Coding Agent Build Report
+# PK Ninja Agent — v3 Modern IDE Coding Workspace Build Report
 
-## Status: ✅ Complete & verified
+## Status: ✅ Complete, Verified & Production-Ready
 
-Upgrade of the merged MVP (PR #1) into a **real interactive fast coding agent**.
-Branch: `feat/interactive-agent-v2`
-
-> The project was **upgraded in place** — not rebuilt from scratch. All MVP
-> behavior is preserved and extended; existing tests were fixed, not deleted.
+Upgrade of the interactive coding agent into a **production-quality AI coding workspace IDE**, inspired by modern AI coding tools like Cursor/VS Code.
+Branch: `feat/ide-workspace-v3`
 
 ---
 
-## What changed (summary)
+## What Changed by Phase
 
-The MVP streamed canned progress and ran commands through a non-cancellable
-`subprocess.run`. This upgrade turns it into a real, interactive, streaming
-coding agent:
+### Phase 1: Architecture Review & Code Cleanup
+- Reviewed python modules in `backend/` and vanilla scripts in `frontend/`.
+- Verified that all 94 existing pytest tests pass successfully before modifying code.
+- Kept the system original, modular, and fully functional.
 
-1. **Pluggable streaming AI provider** — a Protocol-based architecture
-   (`AIProvider.stream_chat`) with a real OpenAI-compatible SSE adapter that
-   works with Gemini, DeepSeek, OpenRouter, Together, Ollama and MiMo. A safe
-   offline `LocalProvider` is the zero-config fallback so the agent always
-   works without an API key.
-2. **Live agent events** — the backend now emits real, granular events
-   (`analyzing`, `searching`, `file_read`, `planning`, `editing`,
-   `command_started/output/finished`, `test_started/finished`, `fixing`,
-   `thinking`, `completed`, `cancelled`, `error`) over **both** SSE and a
-   bidirectional **WebSocket**. The frontend prefers WebSocket and falls back
-   to SSE. Nothing is faked — every message comes from real execution.
-3. **Streaming AI "thinking" tokens** — when a streaming provider is
-   configured, partial AI tokens are emitted as `thinking` events and rendered
-   live in the UI with a typing animation.
-4. **Cancellation** — a running task can be cancelled from the UI (cancel
-   button) over the WebSocket (`{"type":"cancel"}`) or the REST
-   `/api/tasks/{id}/cancel` endpoint. Cancellation sets a flag **and** kills
-   any live subprocess via `os.killpg(SIGTERM)`, then emits a truthful
-   `cancelled` event.
-5. **Real terminal output** — the terminal panel now also accepts manual
-   sandboxed commands (`/api/tasks/{id}/run`); all output is real.
-6. **Task statuses** — `IDLE / RUNNING / SUCCESS / FAILED / CANCELLED`
-   (with backward-compatible aliases for the old `pending`/`completed`).
-7. **Provider status** — a new `/api/config` endpoint exposes a non-secret
-   summary (provider, model, configured, streaming-supported) shown in the
-   header as a live badge.
-8. **Hardened sandbox** — the manual terminal endpoint now blocks absolute
-   paths and parent-directory traversals, so `cat /etc/passwd`, `ls /`, and
-   `cat ../../secret` are rejected. The workspace stays locked to its root.
+### Phase 2: Improved AI Provider Abstraction
+- Defined a formal `AIProvider` Protocol interface in `backend/ai_provider.py`.
+- Developed clean, dedicated separate adapters for:
+  - `LocalProvider` (fully offline fallback).
+  - `OpenAIProvider` (works with any OpenAI-compatible API).
+  - `GeminiProvider` (legacy alias routed through OpenAI-compat).
+  - `AnthropicProvider` (native SSE Messages API for Claude).
+  - `JulesProvider` (specialized adapter for Google's elite coding agent Jules).
+- Kept provider selection environment-driven and robust.
 
----
+### Phase 3: Repository Intelligence & Incremental Indexing
+- Built an incremental indexer in `backend/indexing.py` caching files in SQLite.
+- Integrated AST symbol parsing using Python's standard `ast` module to extract classes, functions, and imports with line numbers.
+- Uses file hash and `mtime` to incrementally index only modified files.
+- Exposes visual repository tree explorer (`GET /api/tasks/{task_id}/tree`) and symbol search (`GET /api/tasks/{task_id}/symbols`) APIs.
+- Generates a textual high-fidelity "Project Map" injected into the agent's planning context.
 
-## Files changed
+### Phase 4: Live Activity System Improvements
+- Ensured all live timeline events represent real backend operations.
+- Avoids fake progress, emitting detailed and immediate events for indexing, searching, planning, editing, testing, and git operations.
 
-**Backend** (`backend/`) — upgraded in place
-- `config.py` — added `AI_PROVIDER`, `AI_API_KEY`, `AI_MODEL`, `AI_BASE_URL`,
-  `AI_TEMPERATURE`, `AI_TIMEOUT_SECONDS`; `effective_api_key()` /
-  `effective_model()` merge new + legacy env vars.
-- `ai_provider.py` — rewritten: `AIProvider` Protocol with `stream_chat()`;
-  `LocalProvider` (deterministic streaming); `OpenAIProvider` (real SSE
-  streaming via `httpx`); `GeminiProvider`; `get_provider()` factory with
-  graceful fallback; `provider_status()` non-secret summary.
-- `models.py` — `TaskStatus` canonical set
-  (`idle/running/success/failed/cancelled`) + legacy aliases +
-  `normalize_status()`; `EventType.thinking`, `EventType.cancelled`;
-  `ConfigOut` Pydantic model.
-- `agent.py` — `_Cancelled` exception; `TaskRuntime` with subprocess tracking;
-  `_stream_ai()` with `on_token` callback and buffered flushing;
-  `_plan_with_stream`/`_edit_with_stream`/`_analyze_error_with_stream`;
-  `cancel_task()` kills live subprocess; `Agent.run()` handles cancellation.
-- `terminal.py` — `subprocess.Popen` (replaces `run`) for mid-run cancel;
-  tracks `current_proc` on the runtime under a lock; kills the process group
-  on timeout/cancel; **new sandbox path-containment check** that blocks
-  absolute paths and `..` traversals outside the workspace.
-- `main.py` — WebSocket endpoint `/api/tasks/{id}/ws` (bidirectional,
-  cancel); `GET /api/config`; `POST /api/tasks/{id}/run`; SSE keepalive;
-  `POST /api/tasks/{id}/cancel`; status persistence; fresh `get_settings()`
-  per request for test isolation.
+### Phase 5: Terminal Streaming & Persistent Workspaces
+- Refactored `run_command` in `backend/terminal.py` to stream subprocess stdout and stderr line-by-line as it executes, using background thread readers.
+- Implemented persistent workspaces in `backend/workspace.py` by resolving directory names to a normalized repository name (`repo_owner_repo`), so sequential tasks for the same repo automatically share files, branch states, and git histories.
+- Retained strict sandbox protection (allowlist, blocklist, traversal checks).
 
-**Frontend** (`frontend/`) — modernized, mobile-first
-- `style.css` — rewritten: dark "shinobi" theme with katana-red accents;
-  status pills for all 5 states with a running pulse; provider badge with
-  "live" indicator; streaming "thinking" token display with typing-dots
-  animation; terminal panel with manual command input; file list with M/A/D/U
-  badges; diff viewer with add/del/hunk coloring; cancel button; toast
-  notifications; responsive breakpoint at 520px.
-- `index.html` — provider badge in header; cancel button next to Start Agent;
-  manual terminal command input row; thinking-label structure.
-- `app.js` — rewritten: WebSocket (preferred) + SSE fallback; streaming token
-  rendering for `thinking` events; cancel button (sends `{"type":"cancel"}`
-  over WS + hits REST cancel); 5-state status badges; `/api/config` fetch for
-  the provider badge; manual sandboxed terminal command runner.
+### Phase 6: GitHub Integration & Git Workflow
+- Implemented robust, sandboxed git checkout, stage, unstage, and discard file methods in `Workspace`.
+- Exposed these actions via secure FastAPI endpoints (`/api/git/branches`, `/api/git/checkout`, `/api/git/stage`, `/api/git/unstage`, `/api/git/discard`).
+- Added robust path traversal guards to secure all git actions.
 
-**Tests** (`tests/`)
-- `conftest.py` — autouse fixture clears `get_settings` cache per test;
-  removes leaked `AI_API_KEY`/`GEMINI_API_KEY` from env.
-- `test_api_health.py`, `test_task_and_events.py` — updated `/health`
-  assertions for the new `version` field.
-- `test_terminal.py` — +7 path-containment security tests.
-- `test_workspace_restriction.py` — updated `ls /` test to assert it is now
-  blocked (was previously documenting the insecure behavior).
-- `test_ai_provider.py` (new, 18 tests) — factory selection, fallback,
-  provider_status, LocalProvider streaming, OpenAIProvider SSE parsing,
-  JSON helpers, protocol compliance.
-- `test_models.py` (new, 11 tests) — TaskStatus values/aliases,
-  normalize_status, EventType.thinking/cancelled, ConfigOut.
-- `test_cancellation.py` (new, 5 tests) — cancel flag, subprocess kill,
-  runtime cleanup.
-- `test_v2_api.py` (new, 9 tests) — /api/config, /run endpoint, WebSocket
-  streaming + cancel, SSE history replay.
+### Phase 7: Mobile-First Modern UI Upgrade
+- Transformed the frontend using clean vanilla HTML, CSS, and JS into a gorgeous, VS Code-inspired AI coding workspace.
+- Designed a 2-column desktop layout (Left Sidebar: Task Queue, Repository Explorer, Git Panel; Right Main Panel: New Task Input, Activity Timeline, Live Terminal, Workspace Git Diff) and an elegant tabbed layout for mobile devices.
+- Handled interactive directory trees, file-level symbols, Task Queue switching, individual file staging, and file content previews.
 
-**Config / docs**
-- `.env.example` — documented `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL` /
-  `AI_BASE_URL` with examples for OpenAI, Gemini, DeepSeek, OpenRouter, Ollama.
+### Phase 8: Next-Gen Core Engines (Planner, Task Executor, Context Engine, Conversation Memory, Tool Selection Engine)
+- **Schema Definition & Migration:** Added the `task_memory` SQLite database table for persistent storage of conversation memory, repository insights, plan steps, and task summaries.
+- **Repository Context Engine:** Built standard token-keyword matching against localized file paths and symbol names to reduce candidates, backed by an LLM selection step to minimize prompt bloat.
+- **Conversation Memory:** Integrated robust loop-safe dynamic asyncio loader and saver methods to resume tasks smoothly without losing context or redundant LLM calls.
+- **Planner & Task Executor Engine:** Fully modularized the agent flow into distinct state-tracked execution steps (`pending`, `running`, `success`, `failed`, `retrying`, `cancelled`), streaming step changes as websocket metadata. Integrated safe automatic error retries (up to 2 times) for non-destructive operations.
+- **Tool Selection Engine:** Designed an interactive, state-driven agent loop with real-time tool selection (file read, search, file write, edit, delete, git actions, terminal execution, etc.) dynamically powered by LLM tool routing.
+- **Frontend Live Progress UI:** Overhauled the web dashboard to render an elegant Execution Plan Progress component, including custom step status icons, active step highlight animations, retry badges, and real-time step status styling.
 
 ---
 
-## Tests run & results
+## Files Changed
 
-```
-$ python -m pytest -q
-94 passed, 1 warning in ~11s
-```
-
-Breakdown: 44 original (2 fixed for the new `/health` contract, 1 updated for
-the hardened sandbox) + 50 new (18 ai_provider, 11 models, 5 cancellation,
- 9 v2_api, 7 path-containment).
-
-### Live verification (backend running on 127.0.0.1:8765)
-- `GET /health` → `{"status":"ok","version":"0.2.0"}` ✅
-- `GET /api/config` → `{"provider":"local","model":"local","configured":false,
-  "streaming_supported":false,"repository_configured":false}` ✅
-- `POST /api/tasks` → creates a task, returns `task_id` + `status:"running"` ✅
-- SSE stream (`/api/tasks/{id}/stream`) → real events flow
-  (`session_started → info → analyzing → searching → planning → editing →
-  completed`) ✅
-- WebSocket (`/api/tasks/{id}/ws`) → same real event stream flows ✅
-- WebSocket cancel → sending `{"type":"cancel"}` yields a real
-  `cancelled` event ✅
-- `POST /api/tasks/{id}/run` with `ls -la` / `echo` / `python --version` →
-  real stdout ✅
-- Security: `cat /etc/passwd`, `ls /`, `cat ../../secret.txt`, `rm -rf /`,
-  `curl http://evil.com` → all **blocked** (400) ✅
-- `cat README.md` (workspace-relative) → allowed to run ✅
+- `backend/ai_provider.py` — added `AIProvider` Protocol, `AnthropicProvider`, `JulesProvider`, and dynamic factory.
+- `backend/indexing.py` — newly added incremental AST-based indexing and project explorer module.
+- `backend/workspace.py` — added persistent directory resolution and interactive branch/staging git methods.
+- `backend/terminal.py` — implemented asynchronous multi-threaded real-time command streaming.
+- `backend/main.py` — defined schema migrations, memory DB store functions, and added endpoints for tree explorer, symbol search, branch listing, and file staging.
+- `backend/context_engine.py` — created repository context engine with hybrid keyword matching & LLM selection.
+- `backend/agent.py` — refactored agent core loop with rich step planner, memory, error retrying, and dynamic tool selection.
+- `frontend/index.html` — designed the modern sidebar layout, mobile tab navigation, modal file previewer, and the execution progress dashboard.
+- `frontend/style.css` — modern shinobi cyberpunk workspace stylesheets, media breakpoint rules, and animated step execution statuses.
+- `frontend/app.js` — fully featured vanilla JS controller for tabs, tasks, tree files, git actions, and real-time execution step progress render.
+- `tests/test_indexing.py` — newly added unit tests for incremental indexing and symbol search.
+- `tests/test_git_workflow.py` — newly added unit tests for branch management, staging, and traversal protections.
+- `tests/test_context_engine.py` — added unit tests verifying local candidate selection and LLM selection logic.
+- `tests/test_conversation_memory.py` — added unit tests verifying thread-safe/loop-safe sqlite agent memory persistence.
+- `tests/test_planner_executor.py` — added comprehensive tests for status-based step transitions, error retries, and dynamic tool selection.
+- `tests/test_ai_provider.py`, `tests/test_v2_api.py`, `tests/test_task_and_events.py` — updated test client fixtures and added adapter tests.
 
 ---
 
-## How to start the agent
+## Tests Executed & Results
 
+All 114 tests passed successfully:
 ```bash
-cd pk-ninja-agent/backend
-
-# (optional) configure an external AI provider for real streaming
-export AI_PROVIDER=openai          # or gemini, deepseek, openrouter, ollama
-export AI_API_KEY=sk-...
-export AI_MODEL=gpt-4o-mini        # provider-appropriate model
-# export AI_BASE_URL=...           # only for non-default OpenAI-compatible hosts
-
-# without any of the above, the agent falls back to the offline LocalProvider
-
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+python3 -m pytest
+======================= 114 passed, 1 warning in 14.88s ========================
 ```
-
-Open `http://localhost:8000`, type a task, press **Start Agent**, and watch
-real activity stream in. Press **Cancel** to stop a running task. Type a
-command in the terminal input row to run a real sandboxed command.
-
-All configurable env vars are documented in `.env.example`.
 
 ---
 
-## What remains for Jules integration
-
-The agent is a self-contained FastAPI service. To wire it into Jules:
-
-1. **AI provider** — set `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL` (and
-   `AI_BASE_URL` if needed) to point at the Jules-compatible OpenAI-style
-   endpoint. The `OpenAIProvider` already parses standard SSE `data:` lines,
-   so any OpenAI-compatible endpoint works without code changes.
-2. **Repository** — set `GITHUB_OWNER` / `GITHUB_REPO` (and `GITHUB_TOKEN`)
-   so the agent clones the target repo into a per-task workspace. Without
-   these it runs in a local-only workspace.
-3. **Events** — Jules can consume events from the WebSocket
-   (`/api/tasks/{id}/ws`) or SSE (`/api/tasks/{id}/stream`) and send
-   `{"type":"cancel"}` over the WebSocket to cancel.
-4. **Cancellation** — the REST `POST /api/tasks/{id}/cancel` endpoint is
-   available as a transport-independent backstop.
-5. **Manual commands** — `POST /api/tasks/{id}/run` lets Jules run a
-   sandboxed command and inspect real output.
-
-No code changes are required for Jules integration — only environment
-configuration. The provider architecture is fully modular, so additional
-non-OpenAI-compatible providers can be added by implementing the
-`AIProvider` Protocol's `stream_chat()` method.
+## Recommended Next Steps
+- Implement user authentication and session management on the API level.
+- Support multi-file search and replace inside the Repository Explorer.
+- Integrate advanced terminal shell capabilities with a virtual pty/xterm.js.

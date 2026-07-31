@@ -4,17 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0d14" />
-  <title>PK Ninja Agent</title>
+  <title>PK Ninja Agent — Workspace</title>
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗡️</text></svg>" />
 <script src="https://sites.super.myninja.ai/_assets/ninja-daytona-script.js"></script>
 </head>
 <body>
+  <!-- Header -->
   <header>
     <div class="header-inner">
       <div class="brand">
         <span class="kanji">忍</span>
-        <span class="name">PK <b>NINJA</b><span>coding agent</span></span>
+        <span class="name">PK <b>NINJA</b><span>IDE coding workspace</span></span>
       </div>
       <div class="header-right">
         <span id="provider-badge" class="provider-badge" hidden>
@@ -26,102 +27,161 @@
     </div>
   </header>
 
-  <main class="wrap">
-    <!-- Repository -->
-    <section class="panel">
-      <div class="panel-head"><span class="ico">⏧</span> Repository</div>
-      <div class="panel-body">
-        <div id="repo-row" class="repo-row">
-          <span class="repo-icon">📦</span>
-          <span id="repo-name" class="repo-name">Not configured</span>
-          <span id="repo-branch" class="repo-branch"></span>
-          <span class="repo-spacer"></span>
-          <span id="repo-badge" class="badge" hidden></span>
-        </div>
-      </div>
-    </section>
+  <!-- Mobile Tab Navigation (Only visible on Mobile) -->
+  <nav class="mobile-tabs">
+    <button class="tab-btn active" data-tab="tab-task">✦ Task</button>
+    <button class="tab-btn" data-tab="tab-activity">🥷 Activity</button>
+    <button class="tab-btn" data-tab="tab-explorer">📂 Explorer</button>
+    <button class="tab-btn" data-tab="tab-git">⏧ Git</button>
+    <button class="tab-btn" data-tab="tab-diff">∆ Diff</button>
+  </nav>
 
-    <!-- Task input -->
-    <section class="panel">
-      <div class="panel-head"><span class="ico">✦</span> New Task</div>
-      <div class="panel-body">
-        <textarea id="task" class="task-input"
-          placeholder="Describe a coding task, e.g. &#34;Add module docstrings to all Python files&#34; or &#34;Create a README.md describing the project&#34;"></textarea>
-        <div class="btn-row">
-          <button id="start" class="btn primary">⚔️ Start Agent</button>
-          <button id="cancel" class="btn danger" hidden>✖ Cancel</button>
-        </div>
-      </div>
-    </section>
+  <!-- Main Grid Workspace Container -->
+  <div class="workspace-layout wrap">
 
-    <!-- Activity -->
-    <details class="panel" open>
-      <summary>
-        <div class="panel-head"><span class="ico">🥷</span> Agent Activity <span class="chev">›</span></div>
-      </summary>
-      <div class="panel-body">
-        <div id="activity" class="activity">
-          <div class="empty-state">Agent activity will appear here in real time.</div>
-        </div>
-      </div>
-    </details>
+    <!-- LEFT SIDEBAR: Tasks, Explorer, Git -->
+    <aside class="workspace-sidebar">
 
-    <!-- Terminal -->
-    <details class="panel" open>
-      <summary>
-        <div class="panel-head"><span class="ico">💻</span> Live Terminal <span class="chev">›</span></div>
-      </summary>
-      <div class="panel-body">
-        <div id="terminal" class="terminal"><div class="empty">Terminal output from real command execution will appear here.</div></div>
-        <div class="term-input-row">
-          <input id="term-input" class="term-input" type="text"
-            placeholder="Run a sandboxed command (e.g. ls -la, python --version)…"
-            autocomplete="off" spellcheck="false" disabled />
-          <button id="term-run" class="btn small" disabled>Run</button>
+      <!-- Task Queue & History Panel -->
+      <section class="panel" id="panel-tasks">
+        <div class="panel-head">
+          <span class="ico">📋</span> Task Queue
+          <span id="task-count" class="count">0</span>
         </div>
-      </div>
-    </details>
-
-    <!-- Changed files -->
-    <details class="panel">
-      <summary>
-        <div class="panel-head"><span class="ico">📂</span> Changed Files <span class="chev">›</span></div>
-      </summary>
-      <div class="panel-body">
-        <ul id="files" class="file-list"><li class="empty-state">No changes yet.</li></ul>
-      </div>
-    </details>
-
-    <!-- Diff -->
-    <details class="panel">
-      <summary>
-        <div class="panel-head"><span class="ico">∆</span> Git Diff <span class="chev">›</span></div>
-      </summary>
-      <div class="panel-body">
-        <div id="diff" class="diff"><span class="empty-state">No diff yet.</span></div>
-      </div>
-    </details>
-
-    <!-- Git controls -->
-    <details class="panel">
-      <summary>
-        <div class="panel-head"><span class="ico">⏧</span> Git Controls <span class="chev">›</span></div>
-      </summary>
-      <div class="panel-body git-controls">
-        <input id="branch-name" type="text" placeholder="Branch name (e.g. feat/add-docstrings)" />
-        <div class="btn-row">
-          <button id="btn-branch" class="btn small">Create Branch</button>
-          <button id="btn-commit" class="btn small">Commit</button>
-          <button id="btn-push" class="btn small">Push</button>
+        <div class="panel-body">
+          <ul id="task-list" class="task-list-items">
+            <li class="empty-state">No tasks available.</li>
+          </ul>
         </div>
-        <div class="btn-row" style="margin-top:10px">
-          <button id="btn-pr-prep" class="btn small ghost">Prepare PR</button>
-          <button id="btn-pr-create" class="btn small">Create PR</button>
+      </section>
+
+      <!-- Repository Explorer Panel -->
+      <section class="panel" id="panel-explorer">
+        <div class="panel-head">
+          <span class="ico">📂</span> Repository Explorer
+          <button id="btn-refresh-tree" class="btn-icon-refresh" title="Refresh Tree">⟳</button>
         </div>
-        <div id="pr-out" class="empty-state" style="margin-top:10px"></div>
+        <div class="panel-body">
+          <div id="repo-row" class="repo-row">
+            <span class="repo-icon">📦</span>
+            <span id="repo-name" class="repo-name">Loading repo...</span>
+            <span id="repo-badge" class="badge" hidden></span>
+          </div>
+          <div id="repo-tree" class="repo-tree-container">
+            <div class="empty-state">Start or select a task to explore files.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Git Controls Panel -->
+      <section class="panel" id="panel-git">
+        <div class="panel-head">
+          <span class="ico">⏧</span> Git Panel
+        </div>
+        <div class="panel-body git-controls">
+          <!-- Branch Selector -->
+          <div class="git-field-label">Active Branch</div>
+          <div class="branch-selector-row">
+            <select id="git-branches">
+              <option value="">(No branch)</option>
+            </select>
+            <button id="btn-new-branch" class="btn btn-tiny" title="New Branch">+</button>
+          </div>
+
+          <!-- Staging / Changed Files list -->
+          <div class="git-field-label" style="margin-top:12px;">Changed Files</div>
+          <ul id="git-files" class="git-file-list">
+            <li class="empty-state">No changes yet.</li>
+          </ul>
+
+          <!-- Commit Area -->
+          <textarea id="commit-message" placeholder="Commit message (e.g. feat: resolve TODOs)"></textarea>
+          <div class="btn-row">
+            <button id="btn-commit" class="btn small">Commit</button>
+            <button id="btn-push" class="btn small">Push</button>
+          </div>
+
+          <div class="git-divider"></div>
+
+          <div class="btn-row">
+            <button id="btn-pr-prep" class="btn small ghost">Prepare PR</button>
+            <button id="btn-pr-create" class="btn small primary">Create PR</button>
+          </div>
+          <div id="pr-out" class="empty-state" style="margin-top:10px"></div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- RIGHT MAIN PANEL: Task input, Activity Timeline, Live Terminal, Diff Viewer -->
+    <main class="workspace-main">
+
+      <!-- New Task Panel -->
+      <section class="panel tab-content" id="tab-task">
+        <div class="panel-head"><span class="ico">✦</span> New Task</div>
+        <div class="panel-body">
+          <textarea id="task" class="task-input"
+            placeholder="Describe a coding task, e.g. &#34;Add module docstrings to all Python files&#34; or &#34;Create a README.md describing the project&#34;"></textarea>
+          <div class="btn-row">
+            <button id="start" class="btn primary">⚔️ Start Agent</button>
+            <button id="cancel" class="btn danger" hidden>✖ Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Activity Timeline Panel -->
+      <section class="panel tab-content" id="tab-activity">
+        <div class="panel-head"><span class="ico">🥷</span> Activity Timeline</div>
+        <div class="panel-body">
+          <!-- Live Step-by-Step Execution Plan -->
+          <div id="execution-plan-box" class="execution-plan-box" hidden>
+            <div class="execution-plan-title">📋 EXECUTION PLAN PROGRESS</div>
+            <div id="execution-steps" class="execution-steps"></div>
+          </div>
+          <div id="activity" class="activity">
+            <div class="empty-state">Agent activity timeline will stream here.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Live Terminal Panel -->
+      <section class="panel tab-content" id="tab-terminal">
+        <div class="panel-head"><span class="ico">💻</span> Live Terminal</div>
+        <div class="panel-body">
+          <div id="terminal" class="terminal">
+            <div class="empty">Live output from real command execution will stream here.</div>
+          </div>
+          <div class="term-input-row">
+            <input id="term-input" class="term-input" type="text"
+              placeholder="Run a sandboxed command (e.g. ls -la, python --version)…"
+              autocomplete="off" spellcheck="false" disabled />
+            <button id="term-run" class="btn small" disabled>Run</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Diff Viewer Panel -->
+      <section class="panel tab-content" id="tab-diff">
+        <div class="panel-head"><span class="ico">∆</span> Workspace Git Diff</div>
+        <div class="panel-body">
+          <div id="diff" class="diff"><span class="empty-state">No diff available.</span></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Interactive File Content Modal -->
+  <div id="file-modal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="modal-title">file_name.py</span>
+        <button id="modal-close" class="modal-close-btn">&times;</button>
       </div>
-    </details>
-  </main>
+      <div class="modal-body">
+        <pre><code id="modal-content"></code></pre>
+      </div>
+    </div>
+  </div>
 
   <div id="toast"></div>
   <script src="/static/app.js"></script>

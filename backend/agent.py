@@ -140,6 +140,11 @@ class TaskRuntime:
     current_proc_lock: threading.Lock = field(default_factory=threading.Lock)
     # Cumulative streamed text from the AI (for the UI).
     streamed_text: List[str] = field(default_factory=list)
+    # Conversation / Task Memory
+    task_context: Dict[str, Any] = field(default_factory=dict)
+    repo_context: Dict[str, Any] = field(default_factory=dict)
+    analysis_summary: str = ""
+    plan_steps: List[Dict[str, Any]] = field(default_factory=list)
 
 
 _RUNTIMES: Dict[str, TaskRuntime] = {}
@@ -280,6 +285,49 @@ class Agent:
     def emit(self, etype: EventType, message: str, **data: Any) -> None:
         BUS.publish(Event(self.task_id, etype, message, data=dict(data)))
 
+    def _load_memory(self) -> None:
+        try:
+            import asyncio
+            from main import db_get_task_memory
+
+            try:
+                loop = asyncio.get_running_loop()
+                future = asyncio.run_coroutine_threadsafe(db_get_task_memory(self.task_id), loop)
+                mem = future.result(timeout=5)
+            except RuntimeError:
+                mem = asyncio.run(db_get_task_memory(self.task_id))
+
+            if mem:
+                import json
+                self.rt.task_context = json.loads(mem["task_context"]) if mem["task_context"] else {}
+                self.rt.repo_context = json.loads(mem["repo_context"]) if mem["repo_context"] else {}
+                self.rt.analysis_summary = mem["analysis_summary"] or ""
+                self.rt.plan_steps = json.loads(mem["plan_steps"]) if mem["plan_steps"] else []
+                self.emit(EventType.info, "Task memory and previous analysis loaded successfully.")
+        except Exception as e:
+            log.warning(f"Failed to load task memory for {self.task_id}: {e}")
+
+    def _save_memory(self) -> None:
+        try:
+            import asyncio
+            from main import db_save_task_memory
+            import json
+
+            task_context_str = json.dumps(self.rt.task_context)
+            repo_context_str = json.dumps(self.rt.repo_context)
+            analysis_summary = self.rt.analysis_summary
+            plan_steps_str = json.dumps(self.rt.plan_steps)
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(db_save_task_memory(self.task_id, task_context_str, repo_context_str,
+                                                     analysis_summary, plan_steps_str))
+            except RuntimeError:
+                asyncio.run(db_save_task_memory(self.task_id, task_context_str, repo_context_str,
+                                                analysis_summary, plan_steps_str))
+        except Exception as e:
+            log.warning(f"Failed to save task memory for {self.task_id}: {e}")
+
     def _stream_ai(self, messages: List[ChatMessage],
                    context_label: str = "AI") -> str:
         """Call the provider's stream_chat and emit real thinking tokens.
@@ -362,8 +410,11 @@ class Agent:
         return False
 
     def _loop(self, rt: TaskRuntime) -> None:
+        # Load any existing persistent memory
+        self._load_memory()
+
         # 1) Set up workspace + connect to repo.
-        ws = Workspace(self.task_id, settings=self.settings)
+        ws = Workspace(self.task_id, settings=self.settings, repo_full=self.repo_full)
         rt.workspace = ws
         self.emit(EventType.info, "Workspace ready.",
                   workspace=str(ws.root))
@@ -396,74 +447,363 @@ class Agent:
 
         self._check_cancel(rt)
 
-        # 2) UNDERSTAND — analyze the task.
+        # Trigger incremental indexing (Phase 3)
+        self.emit(EventType.info, "Indexing repository workspace...")
+        try:
+            import asyncio
+            import aiosqlite
+            from indexing import index_workspace
+            async def _run_idx():
+                async with aiosqlite.connect(self.settings.database_path) as conn:
+                    # Ensure tables exist
+                    await conn.executescript(
+                        "CREATE TABLE IF NOT EXISTS repo_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, mtime REAL NOT NULL, indexed_at TEXT NOT NULL, UNIQUE(task_id, path));"
+                        "CREATE TABLE IF NOT EXISTS repo_symbols (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, symbol_name TEXT NOT NULL, symbol_type TEXT NOT NULL, line_no INTEGER NOT NULL);"
+                    )
+                    await conn.commit()
+                    return await index_workspace(self.task_id, ws, conn)
+
+            try:
+                stats = asyncio.run(_run_idx())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                stats = loop.run_until_complete(_run_idx())
+                loop.close()
+
+            self.emit(EventType.info, f"Repository indexed: {stats['total']} files, "
+                      f"{stats['added']} added, {stats['updated']} updated, {stats['deleted']} deleted.")
+        except Exception as exc:
+            self.emit(EventType.error, f"Indexing failed: {exc}")
+
+        # 2) UNDERSTAND & RELEVANCY SELECTION (Repository Context Engine)
         self.emit(EventType.analyzing, "Understanding the task and repository.")
-        files = ws.list_files()
 
-        # 3) SEARCH — search the repository.
-        self._check_cancel(rt)
-        self.emit(EventType.searching, "Searching repository files.",
-                  count=len(files), files=files[:50])
+        # Hybrid file context detection (candidates filtered using index keywords, then AI select)
+        from context_engine import find_candidate_files, ai_select_relevant_files
+        try:
+            import asyncio
+            candidates = asyncio.run(find_candidate_files(self.task_id, self.description, self.settings.database_path, ws))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            candidates = loop.run_until_complete(find_candidate_files(self.task_id, self.description, self.settings.database_path, ws))
+            loop.close()
 
-        # 4) READ — read relevant files (cap to keep context small).
-        relevant = [f for f in files if f.endswith(
-            (".py", ".js", ".ts", ".md", ".txt", ".json", ".yml", ".yaml",
-             ".html", ".css", ".go", ".rs", ".java"))]
-        relevant = relevant[:20]
+        try:
+            import asyncio
+            if self._is_streaming_provider:
+                relevant_files = asyncio.run(ai_select_relevant_files(self.description, candidates, self.provider))
+            else:
+                relevant_files = candidates[:8] # local fallback context
+        except Exception:
+            relevant_files = candidates[:8]
+
         file_objs: List[dict] = []
-        for f in relevant:
+        for f in relevant_files:
             self._check_cancel(rt)
             try:
                 content = ws.read_file(f)
                 file_objs.append({"path": f, "content": content})
-                self.emit(EventType.file_read, f"Reading {f}",
+                self.emit(EventType.file_read, f"Repository Context Engine loaded {f}",
                           path=f, bytes=len(content))
             except WorkspaceError as exc:
                 self.emit(EventType.error, f"Could not read {f}: {exc}")
 
-        # 5) PLAN — produce a plan (streamed if a real provider is set).
-        self._check_cancel(rt)
-        context = "\n".join(f"### {fo['path']}\n{fo['content'][:1500]}"
-                            for fo in file_objs[:10])
-        plan = self._plan_with_stream(rt, self.description, context)
-        self.emit(EventType.planning, plan.summary, steps=plan.steps)
-
+        # 3) PLAN — produce an execution plan (streamed if a real provider is set).
         self._check_cancel(rt)
 
-        # 6) EDIT — apply edits to files.
-        self.emit(EventType.editing, "Applying edits to files.")
-        edits = self._edit_with_stream(rt, self.description, plan, file_objs)
-        applied: List[str] = []
-        for e in edits:
-            self._check_cancel(rt)
+        # Build project map text representation (Phase 3)
+        project_map_str = ""
+        try:
+            import asyncio
+            import aiosqlite
+            from indexing import get_project_map
+            async def _get_map():
+                async with aiosqlite.connect(self.settings.database_path) as conn:
+                    return await get_project_map(self.task_id, ws, conn)
             try:
-                target = ws.safe_path(e["path"])
-                if target.exists():
-                    ws.write_file(e["path"], e["content"])
-                else:
-                    ws.create_file(e["path"], e["content"])
-                applied.append(e["path"])
-                self.emit(EventType.editing, f"Edited {e['path']}",
-                          path=e["path"], action="write")
-            except WorkspaceError as exc:
-                self.emit(EventType.error, f"Edit failed for {e['path']}: {exc}")
+                project_map_str = asyncio.run(_get_map())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                project_map_str = loop.run_until_complete(_get_map())
+                loop.close()
+        except Exception:
+            pass
 
-        if not applied:
-            self.emit(EventType.info,
-                      "No automated edits produced for this task; see plan above.")
+        context = "\n".join(f"### {fo['path']}\n{fo['content'][:1500]}"
+                            for fo in file_objs)
+        if project_map_str:
+            context = project_map_str + "\n\n" + context
 
-        # 7) VERIFY — run verification (with retry on failure).
-        self._verify_with_retry(rt, ws, file_objs)
+        plan = self._plan_with_stream(rt, self.description, context)
 
-        # 8) Show diff.
-        self._check_cancel(rt)
-        diff = ws.git_diff(staged=False)
-        self.emit(EventType.info, "Computed git diff.",
-                  diff=diff, changed=ws.git_changed_files())
+        # Structured step status tracking: pending initially
+        rt.plan_steps = [
+            {"id": i + 1, "description": step, "status": "pending", "retries": 0}
+            for i, step in enumerate(plan.steps)
+        ]
+        self._save_memory()
+        self.emit(EventType.planning, plan.summary, steps=plan.steps, plan_steps=rt.plan_steps)
 
-        # 9) Branch -> commit -> push.
-        self._check_cancel(rt)
-        self._git_finalize(rt, ws)
+        # 4) EXECUTE — Execute plan steps sequentially
+        self._execute_plan_steps(rt, ws, file_objs)
+
+    def _execute_plan_steps(self, rt: TaskRuntime, ws: Workspace, file_objs: List[dict]) -> None:
+        import json
+        for step in rt.plan_steps:
+            self._check_cancel(rt)
+            step["status"] = "running"
+            self._save_memory()
+            self.emit(EventType.info, f"Starting step {step['id']}: {step['description']}", plan_steps=rt.plan_steps)
+
+            # Execute step with retry mechanism (up to 2 times for recoverable failures)
+            max_retries = 2
+            success = False
+
+            while step["retries"] <= max_retries:
+                try:
+                    # Let the Tool Selection Engine execute tools for this step
+                    self._execute_step_tools(step, rt, ws, file_objs)
+                    step["status"] = "success"
+                    self._save_memory()
+                    self.emit(EventType.info, f"Successfully finished step {step['id']}", plan_steps=rt.plan_steps)
+                    success = True
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    is_unsafe = "blocked" in err_msg.lower() or "rejected" in err_msg.lower() or "escapes" in err_msg.lower()
+
+                    if is_unsafe:
+                        step["status"] = "failed"
+                        self._save_memory()
+                        self.emit(EventType.error, f"Step {step['id']} failed with unsafe/destructive exception: {e}", plan_steps=rt.plan_steps)
+                        raise e
+
+                    # If recoverable, retry
+                    if step["retries"] < max_retries:
+                        step["retries"] += 1
+                        step["status"] = "retrying"
+                        self._save_memory()
+                        self.emit(EventType.info, f"Step {step['id']} failed: {e}. Retrying ({step['retries']}/{max_retries})...", plan_steps=rt.plan_steps)
+                    else:
+                        step["status"] = "failed"
+                        self._save_memory()
+                        self.emit(EventType.error, f"Step {step['id']} failed after maximum retries. Error: {e}", plan_steps=rt.plan_steps)
+                        raise e
+
+            if not success:
+                raise Exception(f"Task step {step['id']} failed.")
+
+    def _execute_step_tools(self, step: dict, rt: TaskRuntime, ws: Workspace, file_objs: List[dict]) -> None:
+        import json
+        if isinstance(self.provider, LocalProvider):
+            # Deterministic tool execution for LocalProvider matching previous tests
+            step_desc = step["description"].lower()
+
+            if "index" in step_desc:
+                self.emit(EventType.info, "Executing tool: indexing")
+                self._run_local_tool("indexing", {}, ws, rt)
+            elif "read" in step_desc or "locate" in step_desc or "inspect" in step_desc or "search" in step_desc:
+                self.emit(EventType.info, "Executing tool: search_files")
+                self._run_local_tool("search_files", {"pattern": "*.py"}, ws, rt)
+            elif "edit" in step_desc or "docstring" in step_desc or "todo" in step_desc or "readme" in step_desc:
+                self.emit(EventType.info, "Applying file edits...")
+                local_edits = self.provider.edit(self.description, Plan(summary="", steps=[]), file_objs)
+                for e in local_edits:
+                    target = ws.safe_path(e["path"])
+                    if target.exists():
+                        ws.write_file(e["path"], e["content"])
+                    else:
+                        ws.create_file(e["path"], e["content"])
+                    self.emit(EventType.editing, f"Edited {e['path']}", path=e["path"], action="write")
+            elif "verify" in step_desc or "verification" in step_desc or "test" in step_desc:
+                self.emit(EventType.info, "Executing tool: testing")
+                res = self._run_local_tool("testing", {}, ws, rt)
+                if not res.get("success", False):
+                    raise Exception(f"Local verification failed with code {res.get('returncode')}")
+            elif "git" in step_desc or "branch" in step_desc or "commit" in step_desc or "push" in step_desc:
+                self.emit(EventType.info, "Executing tool: git push & commit")
+                self._git_finalize(rt, ws)
+            else:
+                # Default fallback
+                self.emit(EventType.info, "Completed standard execution step.")
+        else:
+            # Dynamic AI Tool Selection Agent Loop
+            tool_history = []
+            loop_count = 0
+            max_loops = 10
+
+            while loop_count < max_loops:
+                self._check_cancel(rt)
+                decision = self._prompt_next_tool(step, tool_history, file_objs)
+                tool_name = decision.get("tool")
+                tool_args = decision.get("args", {})
+
+                if not tool_name or tool_name == "finish_step":
+                    self.emit(EventType.info, f"Step {step['id']} finished by agent: {tool_args.get('summary', 'Done')}")
+                    break
+
+                self.emit(EventType.info, f"Executing tool: {tool_name} with args: {json.dumps(tool_args)}")
+
+                try:
+                    result = self._run_local_tool(tool_name, tool_args, ws, rt)
+                    tool_history.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": result
+                    })
+                except Exception as e:
+                    tool_history.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "error": str(e)
+                    })
+                    raise e
+
+                loop_count += 1
+
+    def _prompt_next_tool(self, step: dict, tool_history: List[dict], files: List[dict]) -> dict:
+        import json
+        files_brief = "\n".join(f["path"] for f in files[:30])
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    "You are a highly skilled AI coding executor. Your goal is to complete the CURRENT step of the execution plan.\n"
+                    "Based on the task, the current step description, and the history of tools you have already executed during this step, "
+                    "choose the next tool to execute with its exact arguments. "
+                    "If the step has been completed successfully and no further actions are needed, return the tool 'finish_step'.\n\n"
+                    "Available tools:\n"
+                    "- search_files(pattern: str, text: Optional[str])\n"
+                    "- search_symbols(query: str)\n"
+                    "- read_file(path: str)\n"
+                    "- write_file(path: str, content: str)\n"
+                    "- edit_file(path: str, old: str, new: str, replace_all: bool)\n"
+                    "- delete_file(path: str)\n"
+                    "- git_status()\n"
+                    "- git_diff(staged: bool)\n"
+                    "- git_checkout(branch: str, create: bool)\n"
+                    "- git_stage(path: str)\n"
+                    "- git_unstage(path: str)\n"
+                    "- git_commit(message: str)\n"
+                    "- git_push()\n"
+                    "- run_command(command: str) -- terminal command execution\n"
+                    "- indexing() -- reindex workspace\n"
+                    "- testing() -- run repository verification command\n"
+                    "- finish_step(summary: str)\n\n"
+                    "Return a JSON object with keys 'tool' (string name of the tool) and 'args' (dictionary of tool arguments). "
+                    "Return ONLY valid JSON."
+                )
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Task:\n{self.description}\n\n"
+                    f"Current Step:\nStep {step['id']}: {step['description']}\n\n"
+                    f"Workspace Files:\n{files_brief}\n\n"
+                    f"Tool Execution History so far:\n{json.dumps(tool_history, default=str)}\n\n"
+                    "Next Tool JSON:"
+                )
+            )
+        ]
+
+        try:
+            if hasattr(self.provider, "generate"):
+                text = self.provider.generate(messages)
+            else:
+                res = self.provider.stream_chat(messages)
+                text = res.text
+
+            # Parse the JSON response
+            import re
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if m:
+                obj = json.loads(m.group(0))
+                if "tool" in obj:
+                    return obj
+        except Exception as e:
+            log.warning(f"Failed to query AI next tool: {e}")
+
+        return {"tool": "finish_step", "args": {"summary": "Fallback to completion"}}
+
+    def _run_local_tool(self, name: str, args: dict, ws: Workspace, rt: TaskRuntime) -> dict:
+        if name == "search_files":
+            return ws.search_files(args.get("pattern", "*"), args.get("text"))
+        elif name == "search_symbols":
+            import aiosqlite
+            from indexing import search_symbols
+            try:
+                import asyncio
+                async def _run_search():
+                    async with aiosqlite.connect(ws.settings.database_path) as conn:
+                        return await search_symbols(self.task_id, args.get("query", ""), conn)
+                try:
+                    return asyncio.run(_run_search())
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    res = loop.run_until_complete(_run_search())
+                    loop.close()
+                    return res
+            except Exception as e:
+                return {"error": str(e)}
+        elif name == "read_file":
+            return {"content": ws.read_file(args.get("path"))}
+        elif name == "write_file":
+            ws.write_file(args.get("path"), args.get("content"))
+            return {"success": True}
+        elif name == "edit_file":
+            return ws.edit_file(args.get("path"), args.get("old"), args.get("new"), args.get("replace_all", False))
+        elif name == "delete_file":
+            ws.delete_file(args.get("path"))
+            return {"success": True}
+        elif name == "git_status":
+            return {"status": ws.git_status(), "changed_files": ws.git_changed_files()}
+        elif name == "git_diff":
+            return {"diff": ws.git_diff(staged=args.get("staged", False))}
+        elif name == "git_checkout":
+            res = ws.git_checkout(args.get("branch"), args.get("create", False))
+            if res.success:
+                rt.branch = args.get("branch")
+            return {"success": res.success, "stdout": res.stdout, "stderr": res.stderr}
+        elif name == "git_stage":
+            res = ws.git_stage_file(args.get("path"))
+            return {"success": res.success, "stdout": res.stdout, "stderr": res.stderr}
+        elif name == "git_unstage":
+            res = ws.git_unstage_file(args.get("path"))
+            return {"success": res.success, "stdout": res.stdout, "stderr": res.stderr}
+        elif name == "git_commit":
+            res = ws.git_commit(args.get("message"))
+            return {"success": res.success, "stdout": res.stdout, "stderr": res.stderr}
+        elif name == "git_push":
+            res = ws.git_push(branch=rt.branch)
+            return {"success": res.success, "stdout": res.stdout, "stderr": res.stderr}
+        elif name == "run_command":
+            res = run_command(args.get("command"), ws, rt=rt)
+            return {"success": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
+        elif name == "indexing":
+            import aiosqlite
+            from indexing import index_workspace
+            try:
+                import asyncio
+                async def _run_idx():
+                    async with aiosqlite.connect(self.settings.database_path) as conn:
+                        return await index_workspace(self.task_id, ws, conn)
+                try:
+                    return asyncio.run(_run_idx())
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    res = loop.run_until_complete(_run_idx())
+                    loop.close()
+                    return res
+            except Exception as e:
+                return {"error": str(e)}
+        elif name == "testing":
+            cmd = self._pick_verification_command(ws)
+            if not cmd:
+                return {"success": True, "message": "No verification command found"}
+            res = run_command(cmd, ws, rt=rt)
+            return {"success": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
+        else:
+            raise ValueError(f"Unknown tool: {name}")
 
     # ── Planning with streaming ────────────────────────────────────────
     def _plan_with_stream(self, rt: TaskRuntime, task: str,

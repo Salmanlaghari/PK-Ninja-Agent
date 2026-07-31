@@ -286,22 +286,69 @@ def run_command(command: str, workspace: Workspace,
         if rt is not None:
             with rt.current_proc_lock:
                 rt.current_proc = proc
-        stdout, stderr = proc.communicate(timeout=timeout)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        # Kill the process group and harvest any remaining output.
-        if proc is not None:
+
+        import threading
+        import time
+
+        stdout_buf: List[str] = []
+        stderr_buf: List[str] = []
+
+        def read_stdout():
+            for line in iter(proc.stdout.readline, ""):
+                if line:
+                    stdout_buf.append(line)
+                    try:
+                        from agent import BUS, Event
+                        from models import EventType
+                        BUS.publish(Event(workspace.task_id, EventType.command_output, line, data={"stdout": line}))
+                    except Exception:
+                        pass
+
+        def read_stderr():
+            for line in iter(proc.stderr.readline, ""):
+                if line:
+                    stderr_buf.append(line)
+                    try:
+                        from agent import BUS, Event
+                        from models import EventType
+                        BUS.publish(Event(workspace.task_id, EventType.command_output, line, data={"stderr": line}))
+                    except Exception:
+                        pass
+
+        t1 = threading.Thread(target=read_stdout, daemon=True)
+        t2 = threading.Thread(target=read_stderr, daemon=True)
+        t1.start()
+        t2.start()
+
+        start_time = time.time()
+        timed_out = False
+        while proc.poll() is None:
+            if time.time() - start_time > timeout:
+                timed_out = True
+                break
+            time.sleep(0.05)
+
+        if timed_out:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
             try:
-                stdout, stderr = proc.communicate(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
-        returncode = 124
-        if stderr == "":
-            stderr = f"Command timed out after {timeout}s and was killed."
+                pass
+            returncode = 124
+            stdout = "".join(stdout_buf)
+            stderr = "".join(stderr_buf)
+            if not stderr:
+                stderr = f"Command timed out after {timeout}s and was killed."
+        else:
+            t1.join(timeout=2)
+            t2.join(timeout=2)
+            returncode = proc.returncode
+            stdout = "".join(stdout_buf)
+            stderr = "".join(stderr_buf)
+
     except Exception as exc:  # pragma: no cover - defensive
         returncode = 127
         stdout, stderr = "", f"Failed to start command: {exc}"
