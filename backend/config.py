@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
+    # ── Provider Plugin System (v0.6.0) ─────────────────────────────────
+    # Comma-separated list of provider names to enable (others are disabled).
+    # Empty means "all built-in adapters enabled". Server-side only.
+    provider_enabled_list: str = Field(default="", alias="PROVIDER_ENABLED")
+    # Comma-separated fallback order (overrides the auto-built chain).
+    # Empty means "use the auto-built chain (active first, then compatible)."
+    provider_fallback_order: str = Field(default="", alias="PROVIDER_FALLBACK_ORDER")
+    # When true, the agent loop uses the ProviderManager instead of the plain
+    # get_provider() factory. Default false preserves existing behaviour.
+    provider_manager_enabled: bool = Field(default=False, alias="PROVIDER_MANAGER_ENABLED")
+    # Health-check interval in seconds (0 = disable periodic probing).
+    provider_health_interval_seconds: int = Field(default=0, alias="PROVIDER_HEALTH_INTERVAL")
+
     # Terminal safety
     command_timeout_seconds: int = Field(default=30, alias="COMMAND_TIMEOUT_SECONDS")
 
@@ -90,6 +103,18 @@ class Settings(BaseSettings):
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
         return self.ai_model or self.gemini_model
+
+    def provider_enabled_names(self) -> list:
+        """Parse PROVIDER_ENABLED into a list of provider names (empty = all)."""
+        if not self.provider_enabled_list.strip():
+            return []
+        return [n.strip() for n in self.provider_enabled_list.split(",") if n.strip()]
+
+    def provider_fallback_names(self) -> list:
+        """Parse PROVIDER_FALLBACK_ORDER into an ordered list (empty = auto)."""
+        if not self.provider_fallback_order.strip():
+            return []
+        return [n.strip() for n in self.provider_fallback_order.split(",") if n.strip()]
 
 
 @lru_cache

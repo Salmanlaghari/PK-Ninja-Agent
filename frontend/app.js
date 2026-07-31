@@ -890,6 +890,12 @@ $("btn-refresh-tree").addEventListener("click", (e) => {
   toast("Repository tree refreshed", "ok");
 });
 
+$("btn-refresh-providers").addEventListener("click", (e) => {
+  e.stopPropagation();
+  loadProviders();
+  toast("Providers refreshed", "ok");
+});
+
 // ── Mobile Tabs Switching ────────────────────────────────────────────────
 function switchMobileTab(targetTabId) {
   // Toggle tab buttons
@@ -954,16 +960,109 @@ function initMobileTabState() {
 window.addEventListener("resize", initMobileTabState);
 
 // ── Global registrations for HTML onclick events ────────────────────────
+// Provider management panel (v0.6.0)
+let _providerState = null;
+
+async function loadProviders() {
+  const list = $("provider-list");
+  const activeName = $("provider-active-name");
+  const activeHealth = $("provider-active-health");
+  if (!list) return;
+  try {
+    const r = await fetch("/api/providers");
+    if (!r.ok) { list.innerHTML = '<li class="empty-state">Provider info unavailable.</li>'; return; }
+    const data = await r.json();
+    _providerState = data;
+    activeName.textContent = data.active || "local";
+    const hs = (data.active_health && data.active_health.status) || "unknown";
+    activeHealth.textContent = hs;
+    activeHealth.className = "provider-health-pill " + hs;
+    const names = Object.keys(data.providers || {});
+    if (!names.length) { list.innerHTML = '<li class="empty-state">No providers registered.</li>'; return; }
+    list.innerHTML = "";
+    names.forEach((name) => {
+      const p = data.providers[name];
+      const li = document.createElement("li");
+      if (name === data.active) li.classList.add("active");
+      if (!p.enabled) li.classList.add("disabled");
+      const status = (p.health && p.health.status) || "unknown";
+      li.innerHTML = `<span class="provider-row-name">${p.display_name || name}</span>` +
+                     `<span class="provider-row-status ${status}">${status}</span>`;
+      li.onclick = () => showProviderDetail(name);
+      list.appendChild(li);
+    });
+  } catch (e) {
+    list.innerHTML = '<li class="empty-state">Provider info unavailable.</li>';
+  }
+}
+
+function showProviderDetail(name) {
+  const detail = $("provider-detail");
+  if (!_providerState || !_providerState.providers || !_providerState.providers[name]) return;
+  const p = _providerState.providers[name];
+  const cap = p.capability || {};
+  const health = p.health || {};
+  const capYes = (v) => v ? '<span class="cap-yes">&#10003;</span>' : '<span class="cap-no">&#10007;</span>';
+  const isActive = (name === _providerState.active);
+  detail.className = "provider-detail";
+  detail.innerHTML =
+    `<div><b>${p.display_name || name}</b></div>` +
+    `<div style="margin-top:4px">${p.description || ""}</div>` +
+    `<div class="cap-grid" style="margin-top:8px">` +
+      `<div class="cap-item">${capYes(cap.streaming)} Streaming</div>` +
+      `<div class="cap-item">${capYes(cap.tool_calling)} Tool calling</div>` +
+      `<div class="cap-item">${capYes(cap.code_editing)} Code editing</div>` +
+      `<div class="cap-item">CTX: ${cap.context_window != null ? cap.context_window : "?"}</div>` +
+    `</div>` +
+    `<div style="margin-top:8px">Health: <b>${health.status || "unknown"}</b> - ` +
+    `errors: ${health.error_count || 0} - successes: ${health.success_count || 0}` +
+    (health.avg_response_time_ms != null ? ` - avg ${health.avg_response_time_ms}ms` : "") + `</div>` +
+    `<div class="provider-actions">` +
+      (isActive ? "" : `<button class="btn small" onclick="setActiveProvider('${name}')">Set Active</button>`) +
+      (p.enabled ? `<button class="btn small ghost" onclick="toggleProvider('${name}', false)">Disable</button>`
+                 : `<button class="btn small" onclick="toggleProvider('${name}', true)">Enable</button>`) +
+      `<button class="btn small ghost" onclick="probeProvider('${name}')">Health Check</button>` +
+    `</div>`;
+}
+
+async function setActiveProvider(name) {
+  try {
+    await fetch("/api/providers/active", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    await loadProviders(); loadProvider();
+  } catch (e) {}
+}
+
+async function toggleProvider(name, enable) {
+  try {
+    const url = "/api/providers/" + (enable ? "enable" : "disable");
+    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    await loadProviders();
+  } catch (e) {}
+}
+
+async function probeProvider(name) {
+  try {
+    await fetch(`/api/providers/${name}/health`);
+    await loadProviders(); showProviderDetail(name);
+  } catch (e) {}
+}
+
 window.selectTask = selectTask;
 window.gitStage = gitStage;
 window.gitUnstage = gitUnstage;
 window.gitDiscard = gitDiscard;
 window.toggleSymbols = toggleSymbols;
 window.openFilePreview = openFilePreview;
+window.loadProviders = loadProviders;
+window.setActiveProvider = setActiveProvider;
+window.toggleProvider = toggleProvider;
+window.probeProvider = probeProvider;
+window.showProviderDetail = showProviderDetail;
 
 // ── Init ────────────────────────────────────────────────────────────────
 loadRepo();
 loadProvider();
+loadProviders();
 loadTasks();
 initMobileTabState();
 setStatus("idle", "Idle");

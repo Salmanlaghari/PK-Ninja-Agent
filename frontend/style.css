@@ -850,3 +850,86 @@ header {
   100% { opacity: 0.8; }
 
 }
+
+/* ── Provider Management Panel (v0.6.0) ─────────────────────────────── */
+.provider-controls .provider-active-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text, #e6edf3);
+  margin-top: 4px;
+}
+.provider-health-pill {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  text-transform: capitalize;
+  background: rgba(255,255,255,0.06);
+  color: var(--text-dim, #8b949e);
+}
+.provider-health-pill.healthy { background: rgba(46,160,67,0.18); color: #3fb950; }
+.provider-health-pill.degraded { background: rgba(187,128,9,0.18); color: #d29922; }
+.provider-health-pill.unhealthy { background: rgba(248,81,73,0.18); color: #f85149; }
+.provider-health-pill.disabled { background: rgba(139,148,158,0.18); color: #8b949e; }
+.provider-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.provider-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  cursor: pointer;
+  font-size: 12px;
+  border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.provider-list li:hover { border-color: rgba(88,166,255,0.4); }
+.provider-list li.active { border-color: var(--accent, #58a6ff); background: rgba(88,166,255,0.08); }
+.provider-list li.disabled .provider-row-name { opacity: 0.5; }
+.provider-row-name { font-weight: 500; }
+.provider-row-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: capitalize;
+  background: rgba(255,255,255,0.06);
+  color: var(--text-dim, #8b949e);
+}
+.provider-row-status.healthy { color: #3fb950; }
+.provider-row-status.degraded { color: #d29922; }
+.provider-row-status.unhealthy { color: #f85149; }
+.provider-detail {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim, #8b949e);
+}
+.provider-detail .cap-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin-top: 6px;
+}
+.provider-detail .cap-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.provider-detail .cap-yes { color: #3fb950; }
+.provider-detail .cap-no { color: #8b949e; }
+.provider-detail .provider-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.provider-detail .provider-actions button {
+  font-size: 11px;
+  padding: 3px 8px;
+}

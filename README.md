@@ -38,6 +38,8 @@ PUSH
 
 The agent uses a pluggable **AI provider** interface. The MVP ships with a fully offline `LocalProvider` (no API key, deterministic, real edits for common safe tasks) and a ready-to-use `GeminiProvider` adapter that activates when `GEMINI_API_KEY` is set. Swapping providers does not require touching the GitHub, terminal, workspace, or UI code.
 
+Since **v0.6.0** the project also ships a modular **Provider Plugin System** (`providers/` package) with a `ProviderManager`, capability detection, health monitoring, automatic fallback, and a UI management panel. It is strictly opt-in (`PROVIDER_MANAGER_ENABLED=false` by default) so the existing `get_provider()` factory keeps working unchanged. See §12 *AI Provider Plugin System* for details.
+
 ### Agent tools
 
 `list_files`, `search_files`, `read_file`, `write_file`, `edit_file`, `create_file`, `delete_file`, `git_status`, `git_diff`, `create_branch`, `git_commit`, `git_push`, `run_command`.
@@ -61,11 +63,18 @@ pk-ninja-agent/
 │   ├── ai_provider.py   # AIProvider interface + Local + Gemini adapter
 │   ├── models.py        # pydantic schemas + EventType/TaskStatus enums
 │   └── config.py        # env-driven settings (secrets stay server-side)
+├── providers/           # v0.6.0 Provider Plugin System
+│   ├── interface.py     # ProviderCapability, ProviderHealth, ProviderInfo, ProviderProtocol
+│   ├── manager.py       # ProviderManager: registry, dynamic load, health, fallback
+│   ├── local_provider.py     # LocalAdapter (wraps existing LocalProvider)
+│   ├── openai_provider.py    # OpenAIAdapter (any OpenAI-compatible endpoint)
+│   ├── gemini_provider.py    # GeminiAdapter (config-only, OpenAI-compatible route)
+│   └── mock_provider.py      # MockProvider (deterministic test double)
 ├── frontend/
-│   ├── index.html       # mobile-first ninja UI
-│   ├── app.js           # SSE consumer, panels, git controls
+│   ├── index.html       # mobile-first ninja UI (+ Provider Management panel)
+│   ├── app.js           # SSE consumer, panels, git controls, provider panel
 │   └── style.css        # dark "shinobi" theme
-├── tests/               # pytest suite
+├── tests/               # pytest suite (114 existing + 65 provider system tests)
 ├── .devcontainer/       # Codespaces config
 ├── requirements.txt
 ├── .env.example
@@ -113,6 +122,12 @@ PORT=8000
 AI_PROVIDER=local        # or "gemini"
 GEMINI_API_KEY=          # only if AI_PROVIDER=gemini
 GEMINI_MODEL=gemini-1.5-flash
+
+# v0.6.0 Provider Plugin System (all optional, opt-in)
+PROVIDER_MANAGER_ENABLED=false   # set "true" to use the ProviderManager + fallback
+PROVIDER_ENABLED=local,openai,gemini   # comma-separated enabled provider list
+PROVIDER_FALLBACK_ORDER=          # explicit fallback chain (overrides auto-built)
+PROVIDER_HEALTH_INTERVAL=300      # seconds between background health probes
 
 COMMAND_TIMEOUT_SECONDS=30
 ```
@@ -201,6 +216,12 @@ The frontend is served by the same FastAPI app — there is no separate build st
 | `POST` | `/api/git/push` | Push the branch |
 | `POST` | `/api/pr/prepare` | Prepare a PR (no creation) |
 | `POST` | `/api/pr/create` | Open a real PR (explicit action) |
+| `GET`  | `/api/providers` | List registered providers + health + capabilities (v0.6.0) |
+| `POST` | `/api/providers/enable` | Enable a provider by name |
+| `POST` | `/api/providers/disable` | Disable a provider by name |
+| `POST` | `/api/providers/active` | Set the active provider |
+| `GET`  | `/api/providers/{name}/health` | Provider health (status, errors, avg latency) |
+| `GET`  | `/api/providers/{name}/capabilities` | Provider capability flags |
 
 ---
 
@@ -240,3 +261,97 @@ The architecture was deliberately built so a new AI provider — including Googl
 5. **PR handoff.** Because `github.prepare_pull_request()` already builds the PR title/body/command, a Jules integration can optionally hand off the final commit/PR step to Jules's own git workflow by calling the same server-side functions.
 
 This keeps the agent's safety model intact while letting a more capable model drive planning and editing.
+
+---
+
+## 12. AI Provider Plugin System (v0.6.0)
+
+A modular, opt-in **Provider Plugin System** that adds dynamic provider loading, capability detection, health monitoring, and automatic fallback — all layered *on top of* the existing `backend/ai_provider.py` architecture. No existing functionality was removed or rewritten; backward compatibility is preserved by default.
+
+### Design principles
+
+- **Do not rebuild.** The new `providers/` package wraps the existing provider classes via the adapter pattern; `LocalAdapter`, `OpenAIAdapter`, and `GeminiAdapter` delegate to the original `LocalProvider`/`OpenAIProvider`/`GeminiProvider` implementations.
+- **Backward compatible by default.** `PROVIDER_MANAGER_ENABLED=false` (the default) means `Agent` still uses the original `get_provider()` factory with zero behavior change. Only when the flag is `true` does the `ProviderManager` take over selection, fallback, and health tracking.
+- **Provider independent.** The agent and UI never hard-code a provider; they ask the manager for the active provider and its capabilities.
+- **No unsupported APIs.** The `GeminiAdapter` is configuration-only and routes through Google's documented OpenAI-compatible endpoint. No native Gemini/Vertex API is used or claimed. Providers that cannot be initialised (e.g. missing API key) degrade gracefully to `None` and are skipped in the fallback chain.
+
+### Core components
+
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| `ProviderProtocol` | `providers/interface.py` | Common interface: `plan`, `chat`, `edit`, `review`, `summarize`, `stream` + original `AIProvider` members |
+| `ProviderCapability` | `providers/interface.py` | Flags: `streaming`, `tool_calling`, `code_editing`, `context_window`, `max_output` |
+| `ProviderHealth` | `providers/interface.py` | `status` (UNKNOWN/HEALTHY/DEGRADED/UNHEALTHY/DISABLED), `last_success`, `last_error`, `error_count`, `success_count`, `avg_response_time_ms` |
+| `ProviderInfo` | `providers/interface.py` | Registry record: name, display name, description, capability, `requires_api_key`, enabled, configurable, health, fallback_for |
+| `ProviderManager` | `providers/manager.py` | Central registry, dynamic loading, enable/disable, capability detection, health monitoring, fallback chain, `call()` wrapper |
+| Adapters | `providers/{local,openai,gemini,mock}_provider.py` | Built-in adapters wrapping existing providers |
+
+### Built-in providers
+
+| Name | Class | API key | Notes |
+|------|-------|---------|-------|
+| `local` | `LocalAdapter` → `LocalProvider` | no | Offline, deterministic, safety net. Always available. |
+| `openai` | `OpenAIAdapter` → `OpenAIProvider` | yes | Any OpenAI-compatible Chat Completions endpoint (OpenAI, DeepSeek, Together, OpenRouter, Ollama). Lazy init: missing key → not available, never crashes startup. |
+| `gemini` | `GeminiAdapter` → `GeminiProvider` | yes | Configuration-only; routes through Google's OpenAI-compatible endpoint. No native Gemini API. |
+| `mock` | `MockProvider` | no | Deterministic test double with `MockConfig` (fail injection, latency, canned responses). |
+
+### Capability detection
+
+Each adapter declares a `ProviderCapability` honestly. The manager exposes:
+
+- `manager.capability(name)` → `ProviderCapability`
+- `manager.providers_with_capability(flag)` → list of names supporting a given flag
+- `/api/providers/{name}/capabilities` → JSON view
+
+Capabilities are *declared* (static per adapter) rather than *probed*, so they never trigger an accidental billable API call. `context_window` and `max_output` are reported as `0` (rendered as unknown/null) when model-dependent.
+
+### Health monitoring
+
+`ProviderHealth` tracks every call routed through `manager.call()`:
+
+- On success: `record_success(elapsed_ms)` updates `success_count`, `request_count`, and a running average of response time.
+- On failure: `record_failure(message)` increments `error_count`, stores `last_error`/`last_error_message`.
+- Status thresholds: 0 errors → `HEALTHY`; 3 errors → `DEGRADED`; 5 errors → `UNHEALTHY`. Disabled providers → `DISABLED`.
+- `manager.health_check(name)` runs a lightweight `plan()` probe and returns the health dict.
+
+### Fallback system
+
+`manager.call(method, *args)` iterates the **fallback chain**: the active provider first, then compatible enabled providers, with `local` as the ultimate safety net. If a provider fails, its health is recorded and the next provider is tried. If the active provider becomes `UNHEALTHY`, the successful fallback is promoted to active. If *all* providers fail, the last exception is raised.
+
+The chain is auto-built from enabled providers (active first, then by capability compatibility, `local` last) and can be overridden with `PROVIDER_FALLBACK_ORDER`.
+
+### Configuration (environment variables, server-side only)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PROVIDER_MANAGER_ENABLED` | `false` | Opt-in to the ProviderManager. `false` preserves original `get_provider()` behavior. |
+| `PROVIDER_ENABLED` | `local,openai,gemini` | Comma-separated list of providers to enable at startup. |
+| `PROVIDER_FALLBACK_ORDER` | *(auto)* | Explicit fallback chain, e.g. `openai,local`. Overrides auto-built chain. |
+| `PROVIDER_HEALTH_INTERVAL` | `300` | Seconds between background health probes (configurable). |
+
+Secrets (`AI_API_KEY`, `GEMINI_API_KEY`, etc.) remain server-side only and are never serialized into any API response. The `/api/config` endpoint returns a compact provider summary (names, enabled, available, health status, capability) that deliberately excludes `requires_api_key`; full provider metadata is served only at `/api/providers`.
+
+### Provider Management UI
+
+The sidebar now includes a **Provider Management** panel (`#panel-providers`) showing the active provider name, a live health pill, the list of available providers with enable/disable and set-active controls, and a per-provider detail view with capability flags and health metrics. A refresh button re-fetches `/api/providers`. The panel degrades gracefully when the manager is disabled (shows the classic single-provider status).
+
+### How to add a new provider adapter
+
+1. **Create the adapter module** `providers/myprovider_provider.py`. Implement a class that satisfies `ProviderProtocol` (at minimum `name`, `plan`, `edit`, `analyze_error`, `stream_chat`; optionally `chat`, `review`, `summarize`). Set class attributes `name`, `display_name`, `description`, `capability` (`ProviderCapability(...)`), and `requires_api_key`. If wrapping an existing `ai_provider.py` class, follow the `OpenAIAdapter` pattern: construct the inner provider lazily in `__init__`, catch `AIError` into `self._init_error`, and expose `self._inner`.
+2. **Register the adapter.** Either call `register_adapter("myprovider", MyAdapter, ...)` at import time (add it to `providers/__init__.py`), or register dynamically at runtime via `ProviderManager.register(...)`. The `register_adapter()` function is the public extension point for plugins.
+3. **Add settings (optional).** If your provider needs an API key or base URL, add the field to `backend/config.py` `Settings` following the existing `ai_api_key`/`gemini_api_key` pattern, and read it in your adapter's `__init__`.
+4. **Enable it.** Add the name to `PROVIDER_ENABLED` (or call `manager.enable("myprovider")` via the API). Set it active with `POST /api/providers/active` or `PROVIDER_FALLBACK_ORDER`.
+5. **Test it.** Add tests under `tests/` using `MockProvider`/`MockConfig` patterns for deterministic behavior. Run `pytest -q` — the full suite (existing + provider tests) must stay green.
+
+No changes to `agent.py`, `workspace.py`, `terminal.py`, `github.py`, or the event bus are required — the tool and safety layers remain provider-independent.
+
+### Backward compatibility guarantee
+
+With `PROVIDER_MANAGER_ENABLED=false` (default):
+- `Agent.__init__` calls `get_provider(self.settings)` exactly as before.
+- `provider_status(settings)` and `/api/config` keep their original shape (the `providers` summary field is `null`).
+- All 114 pre-existing tests pass unchanged.
+
+With `PROVIDER_MANAGER_ENABLED=true`:
+- `Agent._select_provider()` uses the manager's active provider, unwrapping the adapter's `_inner` so `isinstance(provider, LocalProvider)` checks still hold.
+- Fallback and health tracking are active; the rest of the agent loop is unchanged.

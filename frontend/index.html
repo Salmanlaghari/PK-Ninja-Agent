@@ -110,6 +110,29 @@
           <div id="pr-out" class="empty-state" style="margin-top:10px"></div>
         </div>
       </section>
+
+      <!-- Provider Management Panel (v0.6.0) -->
+      <section class="panel" id="panel-providers">
+        <div class="panel-head">
+          <span class="ico">&#9881;</span> AI Providers
+          <button id="btn-refresh-providers" class="btn-icon-refresh" title="Refresh Providers">&#8635;</button>
+        </div>
+        <div class="panel-body provider-controls">
+          <div class="git-field-label">Active Provider</div>
+          <div id="provider-active-name" class="provider-active-name">local</div>
+          <div id="provider-active-health" class="provider-health-pill">unknown</div>
+
+          <div class="git-field-label" style="margin-top:12px;">Available Providers</div>
+          <ul id="provider-list" class="provider-list">
+            <li class="empty-state">Loading providers...</li>
+          </ul>
+
+          <div class="git-divider"></div>
+          <div id="provider-detail" class="provider-detail empty-state">
+            Select a provider to view capabilities and health.
+          </div>
+        </div>
+      </section>
     </aside>
 
     <!-- RIGHT MAIN PANEL: Task input, Activity Timeline, Live Terminal, Diff Viewer -->

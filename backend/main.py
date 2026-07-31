@@ -46,7 +46,10 @@ from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from models import (ConfigOut, DiffOut, EventOut, EventType,
                     GitBranchRequest, GitCommitRequest, GitPushRequest,
-                    PRPrepareRequest, TaskCreate, TaskStatus, TaskSummary,
+                    PRPrepareRequest, ProviderActionRequest,
+                    ProviderCapabilityOut, ProviderHealthOut,
+                    ProviderInfoOut, ProviderManagerStatusOut,
+                    TaskCreate, TaskStatus, TaskSummary,
                     normalize_status)
 from workspace import Workspace, WorkspaceError
 
@@ -310,13 +313,146 @@ async def api_config() -> dict:
     # hot-reload), rather than the module-level snapshot from import time.
     fresh = get_settings()
     ps = provider_status(fresh)
+    # v0.6.0: also include a compact, secret-free provider manager summary
+    # (provider names, enabled/health status, capability flags only). The full
+    # provider info (including requires_api_key metadata) is served by the
+    # dedicated /api/providers endpoint. We deliberately keep /api/config
+    # minimal so the existing secret-leak guard continues to pass.
+    providers_summary = None
+    manager_enabled = getattr(fresh, "provider_manager_enabled", False)
+    try:
+        from providers import get_manager
+        mgr = get_manager(fresh)
+        mgr.set_active(fresh.ai_provider or "local")
+        providers_summary = {
+            name: {
+                "name": info.name,
+                "display_name": info.display_name,
+                "enabled": info.enabled,
+                "available": info.is_available,
+                "health_status": info.health.status.value,
+                "capability": info.capability.to_dict(),
+            }
+            for name, info in mgr.all_info().items()
+        }
+    except Exception:  # noqa: BLE001 — never let provider UI break /api/config
+        providers_summary = None
     return ConfigOut(
         provider=ps["provider"],
         model=ps["model"],
         configured=ps["configured"],
         streaming_supported=ps["streaming_supported"],
         repository_configured=bool(fresh.github_repo_full()),
+        provider_manager_enabled=manager_enabled,
+        providers=providers_summary,
     ).model_dump()
+
+
+# ── Provider management (v0.6.0) ────────────────────────────────────────────
+def _provider_manager():
+    """Return the shared ProviderManager, configured from current settings."""
+    from providers import get_manager
+    fresh = get_settings()
+    mgr = get_manager(fresh)
+    # Apply explicit enable list / fallback order if configured.
+    enabled = fresh.provider_enabled_names()
+    if enabled:
+        for name in list(mgr.all_info().keys()):
+            if name not in enabled:
+                mgr.disable(name)
+            else:
+                mgr.enable(name)
+    fallback = fresh.provider_fallback_names()
+    if fallback:
+        mgr.set_fallback_chain(fallback)
+    # Ensure active matches the configured preferred provider.
+    mgr.set_active(fresh.ai_provider or "local")
+    return mgr
+
+
+def _provider_info_to_out(info) -> ProviderInfoOut:
+    cap = info.capability
+    return ProviderInfoOut(
+        name=info.name,
+        display_name=info.display_name,
+        description=info.description,
+        capability=ProviderCapabilityOut(
+            streaming=cap.streaming,
+            tool_calling=cap.tool_calling,
+            code_editing=cap.code_editing,
+            context_window=cap.context_window or None,
+            max_output=cap.max_output or None,
+        ),
+        requires_api_key=info.requires_api_key,
+        enabled=info.enabled,
+        configurable=info.configurable,
+        is_available=info.is_available,
+        health=ProviderHealthOut(**info.health.to_dict()),
+        fallback_for=list(info.fallback_for),
+    )
+
+
+@app.get("/api/providers")
+async def api_providers() -> dict:
+    """Return the full provider manager status (no secrets)."""
+    mgr = _provider_manager()
+    status = mgr.status()
+    active_cap = status.get("active_capability")
+    active_health = status.get("active_health")
+    providers_out = {
+        name: _provider_info_to_out(info)
+        for name, info in mgr.all_info().items()
+    }
+    return ProviderManagerStatusOut(
+        active=status.get("active"),
+        available=status.get("available", []),
+        fallback_chain=status.get("fallback_chain", []),
+        active_capability=ProviderCapabilityOut(**active_cap) if active_cap else None,
+        active_health=ProviderHealthOut(**active_health) if active_health else None,
+        providers=providers_out,
+    ).model_dump()
+
+
+@app.post("/api/providers/enable")
+async def api_provider_enable(req: ProviderActionRequest) -> dict:
+    """Enable a provider by name (server-side; no secrets returned)."""
+    mgr = _provider_manager()
+    ok = mgr.enable(req.name)
+    return {"ok": ok, "name": req.name, "enabled": ok}
+
+
+@app.post("/api/providers/disable")
+async def api_provider_disable(req: ProviderActionRequest) -> dict:
+    """Disable a provider by name."""
+    mgr = _provider_manager()
+    ok = mgr.disable(req.name)
+    return {"ok": ok, "name": req.name, "disabled": ok}
+
+
+@app.post("/api/providers/active")
+async def api_provider_set_active(req: ProviderActionRequest) -> dict:
+    """Select the active provider by name."""
+    mgr = _provider_manager()
+    ok = mgr.set_active(req.name)
+    return {"ok": ok, "active": mgr.active_name}
+
+
+@app.get("/api/providers/{name}/health")
+async def api_provider_health(name: str) -> dict:
+    """Run a lightweight health probe on a provider and return its health."""
+    mgr = _provider_manager()
+    health = mgr.health_check(name)
+    return {"name": name, "health": health}
+
+
+@app.get("/api/providers/{name}/capabilities")
+async def api_provider_capabilities(name: str) -> dict:
+    """Return the declared capabilities of a provider."""
+    mgr = _provider_manager()
+    cap = mgr.capability(name)
+    if cap is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {name}")
+    return {"name": name, "capability": cap.to_dict()}
 
 
 # ── Repository ──────────────────────────────────────────────────────────
