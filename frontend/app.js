@@ -16,6 +16,182 @@ const cancelBtn = $("cancel");
 const termInput = $("term-input");
 const termRun = $("term-run");
 
+/* ============================================================= */
+/* v0.7.0 — Authentication & session management                  */
+/*                                                               */
+/* The session token (when auth is enabled) is stored in         */
+/* sessionStorage and automatically attached to every fetch()    */
+/* call via a transparent wrapper. When auth is disabled (the    */
+/* default), this layer is a no-op and the app behaves exactly   */
+/* as before (backward compatible).                              */
+/* ============================================================= */
+
+const Auth = (() => {
+  const TOKEN_KEY = "pk_ninja_session";
+  const USER_KEY = "pk_ninja_user";
+  let authEnabled = false;
+  let currentUser = null;
+
+  function getToken() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
+  function setToken(t) {
+    if (t) sessionStorage.setItem(TOKEN_KEY, t);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  }
+  function getUser() {
+    try { return JSON.parse(sessionStorage.getItem(USER_KEY) || "null"); }
+    catch { return null; }
+  }
+  function setUser(u) {
+    if (u) sessionStorage.setItem(USER_KEY, JSON.stringify(u));
+    else sessionStorage.removeItem(USER_KEY);
+  }
+
+  // Transparent fetch wrapper: attach Authorization header when we have a token.
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    const tok = getToken();
+    if (tok) {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + tok);
+      init.headers = headers;
+    }
+    return _origFetch(input, init);
+  };
+
+  function showLogin() {
+    const ov = $("login-overlay");
+    if (ov) ov.hidden = false;
+    document.body.classList.add("app-booting");
+  }
+  function hideLogin() {
+    const ov = $("login-overlay");
+    if (ov) ov.hidden = true;
+    document.body.classList.remove("app-booting");
+  }
+  function showError(msg) {
+    const el = $("login-error");
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = !msg;
+  }
+  function renderUserMenu() {
+    const menu = $("user-menu");
+    if (!menu) return;
+    if (!authEnabled || !currentUser) { menu.hidden = true; return; }
+    menu.hidden = false;
+    const nameEl = $("user-name");
+    const avEl = $("user-avatar");
+    if (nameEl) nameEl.textContent = currentUser.display_name || currentUser.username || "User";
+    if (avEl) {
+      if (currentUser.avatar_url) {
+        avEl.style.backgroundImage = `url(${currentUser.avatar_url})`;
+      } else {
+        avEl.style.backgroundImage = "";
+        avEl.style.background = "linear-gradient(135deg, var(--accent), var(--purple))";
+      }
+    }
+  }
+
+  async function checkStatus() {
+    try {
+      const r = await _origFetch("/api/auth/status");
+      if (!r.ok) { authEnabled = true; return false; }
+      const body = await r.json();
+      authEnabled = !!body.auth_enabled;
+      currentUser = body.user || getUser();
+      if (currentUser) setUser(currentUser);
+      return authEnabled;
+    } catch (e) {
+      authEnabled = false;
+      return false;
+    }
+  }
+
+  async function loginGuest() {
+    showError("");
+    const name = ($("login-guest-name") || {}).value || "Guest";
+    try {
+      const r = await _origFetch("/api/auth/guest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: name }),
+      });
+      if (!r.ok) { showError("Guest login failed (" + r.status + ")."); return false; }
+      const body = await r.json();
+      if (body.session) { setToken(body.session); setUser(body.user); currentUser = body.user; }
+      hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
+    } catch (e) { showError("Network error during guest login."); return false; }
+  }
+
+  async function loginGithub() {
+    showError("");
+    const tok = ($("login-github-token") || {}).value || "";
+    if (!tok.trim()) { showError("Please paste a GitHub token."); return false; }
+    try {
+      const r = await _origFetch("/api/auth/github", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ github_token: tok }),
+      });
+      if (!r.ok) {
+        let msg = "GitHub login failed (" + r.status + ").";
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch {}
+        showError(msg); return false;
+      }
+      const body = await r.json();
+      setToken(body.session); setUser(body.user); currentUser = body.user;
+      ($("login-github-token") || {}).value = "";
+      hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
+    } catch (e) { showError("Network error during GitHub login."); return false; }
+  }
+
+  function logout() {
+    // Stateless: just clear client-side state. Best-effort server call.
+    _origFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    setToken(""); setUser(""); currentUser = null;
+    renderUserMenu();
+    if (authEnabled) showLogin();
+  }
+
+  // If a request returns 401 and auth is enabled, force re-login.
+  function handle401() {
+    if (!authEnabled) return;
+    setToken(""); setUser(""); currentUser = null;
+    renderUserMenu();
+    showLogin();
+  }
+
+  // Hook called after a successful login (set by bootApp) to run the
+  // deferred app initialisation.
+  let _onAuthSuccess = () => {};
+  function onAuthSuccess() { _onAuthSuccess(); }
+
+  function init() {
+    // Wire login buttons.
+    const bGG = $("btn-login-github");
+    const bG = $("btn-login-guest");
+    const bLO = $("btn-logout");
+    if (bGG) bGG.addEventListener("click", loginGithub);
+    if (bG) bG.addEventListener("click", loginGuest);
+    if (bLO) bLO.addEventListener("click", logout);
+    // Enter key submits GitHub login.
+    const ghInput = $("login-github-token");
+    if (ghInput) ghInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loginGithub();
+    });
+  }
+
+  return {
+    checkStatus, loginGuest, loginGithub, logout, init, handle401,
+    showLogin, hideLogin, renderUserMenu, onAuthSuccess,
+    set onAuthSuccessHook(fn) { _onAuthSuccess = fn; },
+    get isEnabled() { return authEnabled; },
+    get user() { return currentUser; },
+  };
+})();
+
+
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
 let evtSource = null;     // SSE fallback connection
@@ -1060,9 +1236,30 @@ window.probeProvider = probeProvider;
 window.showProviderDetail = showProviderDetail;
 
 // ── Init ────────────────────────────────────────────────────────────────
-loadRepo();
-loadProvider();
-loadProviders();
-loadTasks();
-initMobileTabState();
-setStatus("idle", "Idle");
+// Auth-aware boot: check whether authentication is enabled. If it is and
+// we have no valid session, show the login screen and defer the rest of
+// the app init until a successful login. When auth is disabled (default),
+// everything boots immediately (backward compatible).
+Auth.init();
+
+async function bootApp() {
+  const enabled = await Auth.checkStatus();
+  // After a deferred login completes, run the rest of the app init.
+  Auth.onAuthSuccessHook = () => {
+    loadRepo(); loadProvider(); loadProviders(); loadTasks();
+    initMobileTabState(); setStatus("idle", "Idle");
+  };
+  if (enabled && !Auth.getToken()) {
+    Auth.showLogin();
+    return; // app init deferred until login succeeds
+  }
+  Auth.renderUserMenu();
+  loadRepo();
+  loadProvider();
+  loadProviders();
+  loadTasks();
+  initMobileTabState();
+  setStatus("idle", "Idle");
+}
+
+bootApp();

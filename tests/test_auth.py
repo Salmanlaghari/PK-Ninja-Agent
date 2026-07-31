@@ -132,6 +132,17 @@ class TestAuthDisabled:
         assert r.status_code == 200
         assert r.json()["success"] is True
 
+    def test_status_is_public_when_enabled(self, monkeypatch):
+        """auth/status must be reachable WITHOUT a token so the frontend can
+        decide whether to show the login screen (chicken-and-egg)."""
+        _set_auth_env(monkeypatch)
+        client = _build_client()
+        r = client.get("/api/auth/status")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["auth_enabled"] is True
+        assert body["user"] is None  # no session → no identity
+
 
 # --------------------------------------------------------------------------- #
 # Auth enabled — guest flow

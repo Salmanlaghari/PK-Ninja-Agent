@@ -291,13 +291,28 @@ def _user_to_out(user: User) -> UserOut:
 
 # ── Authentication routes (v0.7.0) ──────────────────────────────────────────
 @app.get("/api/auth/status")
-async def auth_status(user: User = Depends(current_user)) -> dict:
-    """Report whether auth is enabled and the current session identity."""
+async def auth_status(request: Request) -> dict:
+    """Publicly report whether auth is enabled and the current identity.
+
+    This endpoint does **not** require a session — it must be reachable
+    before login so the frontend can decide whether to show the login
+    screen. When auth is enabled and a valid token is present, the user
+    identity is included; otherwise ``user`` is null.
+    """
     svc = get_auth_service(get_settings())
+    user: Optional[User] = None
+    if svc.enabled:
+        # Best-effort: resolve the user from the header/query, but never 401.
+        authz = request.headers.get("authorization")
+        query_session = request.query_params.get("session")
+        try:
+            user = svc.require_user_from_request(authz, query_session)
+        except InvalidTokenError:
+            user = None
     return SessionOut(
-        authenticated=svc.enabled,
+        authenticated=svc.enabled and user is not None and user.user_id != "anonymous",
         auth_enabled=svc.enabled,
-        user=_user_to_out(user) if user.user_id != "anonymous" else None,
+        user=_user_to_out(user) if (user and user.user_id != "anonymous") else None,
     ).model_dump()
 
 

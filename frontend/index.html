@@ -23,6 +23,11 @@
           <span id="provider-name">local</span>
         </span>
         <span id="status" class="status-pill idle"><span class="dot"></span><span id="status-text">Idle</span></span>
+        <span id="user-menu" class="user-menu" hidden>
+          <span id="user-avatar" class="user-avatar"></span>
+          <span id="user-name" class="user-name">Guest</span>
+          <button id="btn-logout" class="btn btn-tiny ghost" title="Sign out">Sign out</button>
+        </span>
       </div>
     </div>
   </header>
@@ -203,6 +208,39 @@
       <div class="modal-body">
         <pre><code id="modal-content"></code></pre>
       </div>
+    </div>
+  </div>
+
+  <!-- Login Screen (shown only when auth is enabled and no session) -->
+  <div id="login-overlay" class="login-overlay" hidden>
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="kanji">忍</span>
+        <span class="name">PK <b>NINJA</b><span>IDE coding workspace</span></span>
+      </div>
+      <h2 class="login-title">Sign in to continue</h2>
+      <p class="login-sub">Authentication is enabled for this deployment.</p>
+
+      <div id="login-github-section" class="login-section">
+        <label class="login-label" for="login-github-token">GitHub token</label>
+        <input id="login-github-token" class="login-input" type="password"
+          placeholder="Paste a GitHub personal access token" autocomplete="off" spellcheck="false" />
+        <button id="btn-login-github" class="btn primary login-btn">Sign in with GitHub</button>
+        <p class="login-hint">Your token is verified against the GitHub API and never stored server-side.</p>
+      </div>
+
+      <div class="login-divider-row">
+        <span class="login-divider-line"></span><span>or</span><span class="login-divider-line"></span>
+      </div>
+
+      <div class="login-section">
+        <label class="login-label" for="login-guest-name">Guest display name (optional)</label>
+        <input id="login-guest-name" class="login-input" type="text"
+          placeholder="e.g. Ninja" autocomplete="off" spellcheck="false" />
+        <button id="btn-login-guest" class="btn ghost login-btn">Continue as Guest</button>
+      </div>
+
+      <div id="login-error" class="login-error" hidden></div>
     </div>
   </div>
 

@@ -933,3 +933,163 @@ header {
   font-size: 11px;
   padding: 3px 8px;
 }
+
+/* ============================================================= */
+/* v0.7.0 — Authentication UI                                     */
+/* ============================================================= */
+
+/* User menu in header */
+.user-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+}
+.user-avatar {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--purple));
+  display: inline-block;
+  background-size: cover;
+  background-position: center;
+  flex-shrink: 0;
+}
+.user-name {
+  color: var(--text);
+  font-weight: 600;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-menu .btn-tiny { padding: 2px 8px; font-size: 11px; }
+
+/* Login overlay */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(3, 5, 10, 0.92);
+  backdrop-filter: blur(6px);
+  padding: 20px;
+}
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 28px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.5), 0 0 0 1px var(--border-soft);
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.login-brand .kanji {
+  font-size: 34px;
+  color: var(--accent);
+  text-shadow: 0 0 18px var(--accent-glow);
+}
+.login-brand .name {
+  font-size: 18px;
+  color: var(--text);
+  letter-spacing: 0.5px;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+.login-brand .name b { color: var(--accent-2); }
+.login-brand .name span {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+.login-title {
+  margin: 0 0 6px;
+  font-size: 19px;
+  color: var(--text);
+  font-weight: 700;
+}
+.login-sub {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.login-section { margin-bottom: 18px; }
+.login-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+.login-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-bottom: 10px;
+  transition: border-color 0.15s;
+}
+.login-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.login-btn { width: 100%; box-sizing: border-box; }
+.login-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+.login-divider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+.login-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.login-error {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Loading state for app shell (shown briefly while booting) */
+.app-booting .workspace-layout,
+.app-booting .mobile-tabs,
+.app-booting header .header-right > :not(#user-menu) {
+  opacity: 0.4;
+  pointer-events: none;
+}
