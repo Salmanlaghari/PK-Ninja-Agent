@@ -50,6 +50,14 @@ Branch: `feat/ide-workspace-v3`
 - Designed a 2-column desktop layout (Left Sidebar: Task Queue, Repository Explorer, Git Panel; Right Main Panel: New Task Input, Activity Timeline, Live Terminal, Workspace Git Diff) and an elegant tabbed layout for mobile devices.
 - Handled interactive directory trees, file-level symbols, Task Queue switching, individual file staging, and file content previews.
 
+### Phase 8: Next-Gen Core Engines (Planner, Task Executor, Context Engine, Conversation Memory, Tool Selection Engine)
+- **Schema Definition & Migration:** Added the `task_memory` SQLite database table for persistent storage of conversation memory, repository insights, plan steps, and task summaries.
+- **Repository Context Engine:** Built standard token-keyword matching against localized file paths and symbol names to reduce candidates, backed by an LLM selection step to minimize prompt bloat.
+- **Conversation Memory:** Integrated robust loop-safe dynamic asyncio loader and saver methods to resume tasks smoothly without losing context or redundant LLM calls.
+- **Planner & Task Executor Engine:** Fully modularized the agent flow into distinct state-tracked execution steps (`pending`, `running`, `success`, `failed`, `retrying`, `cancelled`), streaming step changes as websocket metadata. Integrated safe automatic error retries (up to 2 times) for non-destructive operations.
+- **Tool Selection Engine:** Designed an interactive, state-driven agent loop with real-time tool selection (file read, search, file write, edit, delete, git actions, terminal execution, etc.) dynamically powered by LLM tool routing.
+- **Frontend Live Progress UI:** Overhauled the web dashboard to render an elegant Execution Plan Progress component, including custom step status icons, active step highlight animations, retry badges, and real-time step status styling.
+
 ---
 
 ## Files Changed
@@ -58,22 +66,27 @@ Branch: `feat/ide-workspace-v3`
 - `backend/indexing.py` — newly added incremental AST-based indexing and project explorer module.
 - `backend/workspace.py` — added persistent directory resolution and interactive branch/staging git methods.
 - `backend/terminal.py` — implemented asynchronous multi-threaded real-time command streaming.
-- `backend/main.py` — defined schema migrations and added endpoints for tree explorer, symbol search, branch listing, and file staging.
-- `frontend/index.html` — designed the modern sidebar layout, mobile tab navigation, and modal file previewer.
-- `frontend/style.css` — modern shinobi cyberpunk workspace stylesheets and media breakpoint rules.
-- `frontend/app.js` — fully featured vanilla JS controller for tabs, tasks, tree files, and git actions.
+- `backend/main.py` — defined schema migrations, memory DB store functions, and added endpoints for tree explorer, symbol search, branch listing, and file staging.
+- `backend/context_engine.py` — created repository context engine with hybrid keyword matching & LLM selection.
+- `backend/agent.py` — refactored agent core loop with rich step planner, memory, error retrying, and dynamic tool selection.
+- `frontend/index.html` — designed the modern sidebar layout, mobile tab navigation, modal file previewer, and the execution progress dashboard.
+- `frontend/style.css` — modern shinobi cyberpunk workspace stylesheets, media breakpoint rules, and animated step execution statuses.
+- `frontend/app.js` — fully featured vanilla JS controller for tabs, tasks, tree files, git actions, and real-time execution step progress render.
 - `tests/test_indexing.py` — newly added unit tests for incremental indexing and symbol search.
 - `tests/test_git_workflow.py` — newly added unit tests for branch management, staging, and traversal protections.
+- `tests/test_context_engine.py` — added unit tests verifying local candidate selection and LLM selection logic.
+- `tests/test_conversation_memory.py` — added unit tests verifying thread-safe/loop-safe sqlite agent memory persistence.
+- `tests/test_planner_executor.py` — added comprehensive tests for status-based step transitions, error retries, and dynamic tool selection.
 - `tests/test_ai_provider.py`, `tests/test_v2_api.py`, `tests/test_task_and_events.py` — updated test client fixtures and added adapter tests.
 
 ---
 
 ## Tests Executed & Results
 
-All 106 tests passed successfully in 14.71 seconds:
+All 114 tests passed successfully:
 ```bash
 python3 -m pytest
-======================= 106 passed, 1 warning in 14.71s ========================
+======================= 114 passed, 1 warning in 14.88s ========================
 ```
 
 ---
@@ -81,3 +94,4 @@ python3 -m pytest
 ## Recommended Next Steps
 - Implement user authentication and session management on the API level.
 - Support multi-file search and replace inside the Repository Explorer.
+- Integrate advanced terminal shell capabilities with a virtual pty/xterm.js.

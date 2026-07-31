@@ -132,6 +132,34 @@ function appendThinkingToken(token) {
   activity.scrollTop = activity.scrollHeight;
 }
 
+function updateExecutionPlanUI(planSteps) {
+  if (!planSteps || !planSteps.length) return;
+  const box = $("execution-plan-box");
+  const stepsContainer = $("execution-steps");
+  if (!box || !stepsContainer) return;
+
+  box.hidden = false;
+  stepsContainer.innerHTML = planSteps.map((step) => {
+    let icon = "⏳";
+    let cls = "pending";
+    if (step.status === "running") { icon = "⚡"; cls = "running"; }
+    else if (step.status === "success") { icon = "✅"; cls = "success"; }
+    else if (step.status === "failed") { icon = "❌"; cls = "failed"; }
+    else if (step.status === "retrying") { icon = "🔄"; cls = "retrying"; }
+    else if (step.status === "cancelled") { icon = "✖"; cls = "cancelled"; }
+
+    const retryLabel = step.retries > 0 ? `<span class="step-retry-badge">Retry ${step.retries}</span>` : "";
+
+    return `
+      <div class="execution-step-item ${cls}">
+        <span class="step-icon">${icon}</span>
+        <span class="step-desc">Step ${step.id}: ${escapeHtml(step.description)}</span>
+        ${retryLabel}
+      </div>
+    `;
+  }).join("");
+}
+
 function renderEvent(ev) {
   if (ev.type === "thinking") {
     const token = (ev.data && (ev.data.token || ev.data.text)) ||
@@ -140,6 +168,11 @@ function renderEvent(ev) {
     return;
   }
   closeThinkingLine();
+
+  // Dynamically update structured step plan if provided in event metadata
+  if (ev.data && ev.data.plan_steps) {
+    updateExecutionPlanUI(ev.data.plan_steps);
+  }
 
   clearPlaceholders();
   const div = document.createElement("div");
@@ -703,6 +736,8 @@ startBtn.addEventListener("click", async () => {
   terminal.innerHTML = "";
   thinkingLine = null;
   setStatus("running", "Starting");
+  const planBox = $("execution-plan-box");
+  if (planBox) planBox.hidden = true;
   try {
     const r = await fetch("/api/tasks", {
       method: "POST",

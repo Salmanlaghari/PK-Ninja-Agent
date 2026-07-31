@@ -67,7 +67,8 @@ async def _db() -> aiosqlite.Connection:
     conn = await aiosqlite.connect(str(_DB_PATH))
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
-    # Ensure schema exists on every connection (idempotent + defensive).
+    # Ensure schema exists on every connection (idempotent + defensive so the
+    # app works even if the startup hook hasn't run yet, e.g. under reload).
     await conn.executescript(_SCHEMA_SQL)
     await conn.commit()
     return conn
@@ -113,6 +114,15 @@ CREATE TABLE IF NOT EXISTS repo_symbols (
     line_no INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_task ON repo_symbols(task_id);
+
+CREATE TABLE IF NOT EXISTS task_memory (
+    task_id TEXT PRIMARY KEY,
+    task_context TEXT,
+    repo_context TEXT,
+    analysis_summary TEXT,
+    plan_steps TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -208,6 +218,31 @@ async def db_list_events(task_id: str) -> List[dict]:
             out.append({"type": r["type"], "message": r["message"],
                         "data": data, "timestamp": r["timestamp"]})
         return out
+    finally:
+        await conn.close()
+
+
+async def db_save_task_memory(task_id: str, task_context: str, repo_context: str,
+                              analysis_summary: str, plan_steps: str) -> None:
+    now = _dt.datetime.utcnow().isoformat() + "Z"
+    conn = await _db()
+    try:
+        await conn.execute(
+            "INSERT OR REPLACE INTO task_memory (task_id, task_context, repo_context, "
+            "analysis_summary, plan_steps, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, task_context, repo_context, analysis_summary, plan_steps, now)
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def db_get_task_memory(task_id: str) -> Optional[dict]:
+    conn = await _db()
+    try:
+        cur = await conn.execute("SELECT * FROM task_memory WHERE task_id=?", (task_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
     finally:
         await conn.close()
 
