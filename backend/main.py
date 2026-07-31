@@ -49,6 +49,7 @@ from auth import (AuthError, AuthService, InvalidTokenError, User,
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
+from release_checks import system_health as _system_health
 from workspace_manager import (WorkspaceManagerError, create_workspace,
                                delete_workspace, list_workspaces,
                                recent_workspaces, rename_workspace,
@@ -453,6 +454,100 @@ async def api_switch_workspace(body: WorkspaceActionRequest,
     except WorkspaceManagerError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return WorkspaceOut(**item).model_dump()
+
+
+# ── Dashboard (v0.7.0) ────────────────────────────────────────────────────────
+def _task_row_to_item(row: dict) -> DashboardTaskItem:
+    return DashboardTaskItem(
+        task_id=str(row.get("task_id", "")),
+        description=str(row.get("description", "")),
+        status=normalize_status(row.get("status", "idle")),
+        created_at=str(row.get("created_at", "")),
+        branch=row.get("branch"),
+    )
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(user: User = Depends(current_user)) -> dict:
+    """Aggregated dashboard: tasks, agent, workspace, git, provider, health."""
+    settings = get_settings()
+    # Tasks
+    rows = await db_list_tasks()
+    for r in rows:
+        _runtime_status(r.get("task_id", ""), r)
+    recent = [_task_row_to_item(r) for r in rows[:10]]
+    active = [_task_row_to_item(r) for r in rows
+              if r.get("status") in ("running", "planning", "queued")]
+    # Agent status
+    runtimes = list_runtimes()
+    agent_status = "idle"
+    if any(rt.status.value in ("running", "planning") for rt in runtimes):
+        agent_status = "busy"
+    # Workspace status
+    ws_status: dict = {"count": 0, "default": None}
+    try:
+        items = await list_workspaces(settings)
+        ws_status = {
+            "count": len(items),
+            "default": next((w["name"] for w in items if w["is_default"]), None),
+            "names": [w["name"] for w in items],
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # Git status
+    git_status: dict = {"configured": False}
+    try:
+        info = repo_info(settings)
+        git_status = {
+            "configured": True,
+            "full_name": info.full_name,
+            "default_branch": info.default_branch,
+            "private": info.private,
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # Provider status
+    provider_status: dict = {"configured": False}
+    try:
+        ps = provider_status(settings)
+        provider_status = {
+            "configured": bool(ps.get("configured")),
+            "provider": ps.get("provider"),
+            "model": ps.get("model"),
+            "streaming_supported": ps.get("streaming_supported"),
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # System health
+    try:
+        sh = _system_health(settings)
+        sys_components = [SystemHealthComponent(**c) for c in sh.get("components", [])]
+    except Exception:  # noqa: BLE001
+        sys_components = []
+    out = DashboardOut(
+        recent_tasks=recent,
+        active_tasks=active,
+        agent_status=agent_status,
+        workspace_status=ws_status,
+        git_status=git_status,
+        provider_status=provider_status,
+        system_health=sys_components,
+        multi_agent_enabled=bool(getattr(settings, "multi_agent_enabled", False)),
+    )
+    return out.model_dump()
+
+
+@app.get("/api/system/health")
+async def api_system_health() -> dict:
+    """Public system-health snapshot (no auth, no secrets)."""
+    sh = _system_health(get_settings())
+    return SystemHealthOut(
+        status=sh.get("status", "unknown"),
+        version=sh.get("version", "0.7.0"),
+        environment=sh.get("environment", "development"),
+        components=[SystemHealthComponent(**c) for c in sh.get("components", [])],
+        startup_checks=sh.get("components", []),
+    ).model_dump()
 
 
 # Wire event persistence into the bus + keep DB task status in sync.

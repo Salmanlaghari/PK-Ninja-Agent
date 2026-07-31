@@ -715,6 +715,120 @@ const Providers = (() => {
 window.Providers = window.Providers || {};
 
 
+/* ============================================================= */
+/* v0.7.0 — Dashboard panel controller                           */
+/* ============================================================= */
+const Dashboard = (() => {
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function renderTaskList(containerId, items) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!items || !items.length) {
+      const e = document.createElement("div");
+      e.className = "ws-empty";
+      e.textContent = "No tasks.";
+      el.appendChild(e);
+      return;
+    }
+    items.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "pm-card";
+      row.innerHTML =
+        `<div class="pm-card-head">` +
+          `<span class="pm-card-name">${esc(t.task_id)}</span>` +
+          `<span class="provider-row-status ${esc(t.status)}">${esc(t.status)}</span>` +
+        `</div>` +
+        `<div style="font-size:12px;opacity:0.7;margin-top:3px">${esc(t.description)}</div>` +
+        `<div style="font-size:11px;opacity:0.5;margin-top:2px">${esc(t.created_at)}${t.branch ? " · " + esc(t.branch) : ""}</div>`;
+      el.appendChild(row);
+    });
+  }
+
+  function renderHealth(containerId, components) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!components || !components.length) {
+      const e = document.createElement("div");
+      e.className = "ws-empty";
+      e.textContent = "No health data.";
+      el.appendChild(e);
+      return;
+    }
+    components.forEach((c) => {
+      const row = document.createElement("div");
+      row.className = "pm-card";
+      row.innerHTML =
+        `<div class="pm-card-head">` +
+          `<span class="pm-card-name">${esc(c.name)}</span>` +
+          `<span class="provider-row-status ${esc(c.status)}">${esc(c.status)}</span>` +
+        `</div>` +
+        (c.detail ? `<div style="font-size:12px;opacity:0.7;margin-top:3px">${esc(c.detail)}</div>` : "");
+      el.appendChild(row);
+    });
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/dashboard");
+      if (!r.ok) return;
+      const d = await r.json();
+      $("dash-agent").textContent = d.agent_status || "idle";
+      $("dash-multiagent").textContent = d.multi_agent_enabled ? "on" : "off";
+      renderTaskList("dash-active-tasks", d.active_tasks);
+      renderTaskList("dash-recent-tasks", d.recent_tasks);
+      const ws = d.workspace_status || {};
+      $("dash-workspace").innerHTML =
+        `Workspaces: <b>${ws.count || 0}</b>` +
+        (ws.default ? ` · default: <b>${esc(ws.default)}</b>` : "") +
+        (ws.names && ws.names.length ? `<br><span style="opacity:0.6;font-size:12px">${esc(ws.names.join(", "))}</span>` : "");
+      const git = d.git_status || {};
+      $("dash-git").innerHTML = git.configured
+        ? `Repository: <b>${esc(git.full_name)}</b> · branch: <b>${esc(git.default_branch)}</b>${git.private ? " (private)" : ""}`
+        : "No repository configured.";
+      const prov = d.provider_status || {};
+      $("dash-provider").innerHTML = prov.configured
+        ? `Provider: <b>${esc(prov.provider)}</b> · model: <b>${esc(prov.model)}</b> · streaming: ${prov.streaming_supported ? "yes" : "no"}`
+        : "No AI provider configured.";
+      renderHealth("dash-health", d.system_health || []);
+      // System status from health endpoint
+      try {
+        const sr = await fetch("/api/system/health");
+        if (sr.ok) {
+          const sh = await sr.json();
+          $("dash-sysstatus").textContent = sh.status || "—";
+          $("dash-version").textContent = sh.version || "0.7.0";
+          renderHealth("dash-health", sh.components || []);
+        }
+      } catch {}
+    } catch (e) {}
+  }
+
+  function open() { const m = $("dashboard-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("dashboard-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-dashboard");
+    const bClose = $("dashboard-close");
+    const bRefresh = $("dash-refresh");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bRefresh) bRefresh.addEventListener("click", load);
+    const overlay = $("dashboard-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, open, close };
+})();
+
+
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
 let evtSource = null;     // SSE fallback connection
@@ -1767,6 +1881,7 @@ Auth.init();
 Settings.init();
 Workspaces.init();
 Providers.init();
+Dashboard.init();
 
 async function bootApp() {
   const enabled = await Auth.checkStatus();

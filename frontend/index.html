@@ -26,6 +26,7 @@
         <button id="btn-settings" class="btn btn-tiny ghost header-btn" title="Settings">&#9881; Settings</button>
         <button id="btn-workspaces" class="btn btn-tiny ghost header-btn" title="Workspaces">&#128193; Workspaces</button>
         <button id="btn-providers" class="btn btn-tiny ghost header-btn" title="AI Providers">&#129302; Providers</button>
+        <button id="btn-dashboard" class="btn btn-tiny ghost header-btn" title="Dashboard">&#128202; Dashboard</button>
         <span id="user-menu" class="user-menu" hidden>
           <span id="user-avatar" class="user-avatar"></span>
           <span id="user-name" class="user-name">Guest</span>
@@ -210,6 +211,67 @@
       </div>
       <div class="modal-body">
         <pre><code id="modal-content"></code></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard Modal (v0.7.0 Phase 5) -->
+  <div id="dashboard-modal" class="modal-overlay" hidden>
+    <div class="modal-box settings-box">
+      <div class="modal-head">
+        <span>&#128202; Dashboard</span>
+        <button id="dashboard-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body settings-body">
+        <div class="pm-summary">
+          <div class="pm-summary-item">
+            <span class="pm-summary-label">Agent</span>
+            <span id="dash-agent" class="pm-summary-value">idle</span>
+          </div>
+          <div class="pm-summary-item">
+            <span class="pm-summary-label">System</span>
+            <span id="dash-sysstatus" class="pm-summary-value">—</span>
+          </div>
+          <div class="pm-summary-item">
+            <span class="pm-summary-label">Version</span>
+            <span id="dash-version" class="pm-summary-value">0.7.0</span>
+          </div>
+          <div class="pm-summary-item">
+            <span class="pm-summary-label">Multi-Agent</span>
+            <span id="dash-multiagent" class="pm-summary-value">off</span>
+          </div>
+          <button id="dash-refresh" class="btn ghost btn-tiny">&#8635; Refresh</button>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Active Tasks</label>
+          <div id="dash-active-tasks" class="pm-list"></div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Recent Tasks</label>
+          <div id="dash-recent-tasks" class="pm-list"></div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Workspace Status</label>
+          <div id="dash-workspace" class="pm-detail"></div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Git Status</label>
+          <div id="dash-git" class="pm-detail"></div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">Provider Status</label>
+          <div id="dash-provider" class="pm-detail"></div>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">System Health</label>
+          <div id="dash-health" class="pm-list"></div>
+        </div>
       </div>
     </div>
   </div>
