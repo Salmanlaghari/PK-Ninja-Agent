@@ -1,6 +1,18 @@
 """Centralized configuration loaded from environment variables.
 
 No secrets are ever sent to the frontend — everything here stays server-side.
+
+AI provider configuration is fully driven by environment variables so that
+any OpenAI-compatible endpoint can be plugged in (Gemini OpenAI-compat, MiMo,
+OpenAI, a local Ollama server, etc.) without touching code:
+
+    AI_PROVIDER   = local | openai   (default: local — safe offline fallback)
+    AI_API_KEY    = <key>            (only required for non-local providers)
+    AI_MODEL      = <model name>     (e.g. gemini-2.0-flash, gpt-4o-mini, …)
+    AI_BASE_URL   = <endpoint URL>   (OpenAI-compatible /v1 base URL)
+
+If AI_PROVIDER is "local" (or unset), the agent uses the deterministic
+LocalProvider and needs no key or network — the MVP keeps working offline.
 """
 from __future__ import annotations
 
@@ -31,8 +43,25 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
 
-    # AI provider
+    # ── AI provider (fully configurable) ────────────────────────────────
+    # Which provider to use: "local" (offline, no key) or "openai" (any
+    # OpenAI-compatible REST endpoint). Default is the safe offline fallback.
     ai_provider: str = Field(default="local", alias="AI_PROVIDER")
+    # API key for the chosen provider. Never exposed to the frontend.
+    ai_api_key: str = Field(default="", alias="AI_API_KEY")
+    # Model name to send to the provider.
+    ai_model: str = Field(default="", alias="AI_MODEL")
+    # OpenAI-compatible base URL (must end with /v1 or similar). If empty,
+    # the OpenAIProvider uses its built-in default.
+    ai_base_url: str = Field(default="", alias="AI_BASE_URL")
+    # Optional temperature override.
+    ai_temperature: float = Field(default=0.2, alias="AI_TEMPERATURE")
+    # Request timeout for AI calls (seconds).
+    ai_timeout_seconds: int = Field(default=90, alias="AI_TIMEOUT_SECONDS")
+
+    # ── Legacy Gemini env vars (kept for backward compatibility) ────────
+    # If AI_PROVIDER=gemini is set, these map into the OpenAI-compatible
+    # provider using Google's OpenAI-compatible endpoint.
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
@@ -53,6 +82,14 @@ class Settings(BaseSettings):
         if self.github_owner and self.github_repo:
             return f"{self.github_owner}/{self.github_repo}"
         return None
+
+    def effective_api_key(self) -> str:
+        """Resolve the API key from either the new or legacy env vars."""
+        return self.ai_api_key or self.gemini_api_key
+
+    def effective_model(self) -> str:
+        """Resolve the model name from either the new or legacy env vars."""
+        return self.ai_model or self.gemini_model
 
 
 @lru_cache
