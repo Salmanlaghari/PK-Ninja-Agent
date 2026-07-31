@@ -128,3 +128,56 @@ class ConfigOut(BaseModel):
     configured: bool
     streaming_supported: bool
     repository_configured: bool
+    # v0.6.0 — provider plugin system summary (optional, backward compatible).
+    provider_manager_enabled: bool = False
+    providers: Optional[Dict[str, Any]] = None
+
+
+class ProviderCapabilityOut(BaseModel):
+    """Capability flags for a provider (non-secret)."""
+    streaming: bool = False
+    tool_calling: bool = False
+    code_editing: bool = True
+    context_window: Optional[int] = None
+    max_output: Optional[int] = None
+
+
+class ProviderHealthOut(BaseModel):
+    """Health metrics for a provider (non-secret)."""
+    status: str = "unknown"
+    last_success: Optional[str] = None
+    last_error: Optional[str] = None
+    last_error_message: Optional[str] = None
+    error_count: int = 0
+    success_count: int = 0
+    request_count: int = 0
+    avg_response_time_ms: Optional[float] = None
+
+
+class ProviderInfoOut(BaseModel):
+    """Public info for a single registered provider (no secrets)."""
+    name: str
+    display_name: str
+    description: str
+    capability: ProviderCapabilityOut
+    requires_api_key: bool = False
+    enabled: bool = True
+    configurable: bool = True
+    is_available: bool = True
+    health: ProviderHealthOut
+    fallback_for: List[str] = []
+
+
+class ProviderManagerStatusOut(BaseModel):
+    """Public snapshot of the provider manager (no secrets)."""
+    active: Optional[str] = None
+    available: List[str] = []
+    fallback_chain: List[str] = []
+    active_capability: Optional[ProviderCapabilityOut] = None
+    active_health: Optional[ProviderHealthOut] = None
+    providers: Dict[str, ProviderInfoOut] = {}
+
+
+class ProviderActionRequest(BaseModel):
+    """Request body for enable/disable/set-active actions."""
+    name: str

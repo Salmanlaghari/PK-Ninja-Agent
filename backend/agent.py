@@ -278,8 +278,34 @@ class Agent:
         self.settings = settings or get_settings()
         self.rt = TaskRuntime(task_id=task_id, description=description,
                               repo_full=repo_full)
-        self.provider = get_provider(self.settings)
+        self.provider = self._select_provider()
         self._is_streaming_provider = not isinstance(self.provider, LocalProvider)
+
+    def _select_provider(self):
+        """Choose the AI provider.
+
+        Default (backward compatible): ``get_provider(settings)`` returns the
+        configured provider exactly as before.
+
+        v0.6.0 opt-in: when ``settings.provider_manager_enabled`` is true, use
+        the :class:`ProviderManager` to select the active provider and apply
+        fallback/health logic. We extract the *underlying* provider object so
+        all existing ``isinstance(..., LocalProvider)`` / ``hasattr(...,
+        "generate")`` checks in the agent loop continue to work unchanged.
+        """
+        if getattr(self.settings, "provider_manager_enabled", False):
+            try:
+                from providers import get_manager
+                mgr = get_manager(self.settings)
+                inst = mgr.get_active()
+                if inst is not None:
+                    # Unwrap adapter to the real provider for isinstance parity.
+                    inner = getattr(inst, "_inner", inst)
+                    if inner is not None:
+                        return inner
+            except Exception:
+                pass  # fall through to the default factory
+        return get_provider(self.settings)
 
     # ── Event helpers ──────────────────────────────────────────────────
     def emit(self, etype: EventType, message: str, **data: Any) -> None:
