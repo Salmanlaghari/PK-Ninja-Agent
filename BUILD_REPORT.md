@@ -58,6 +58,21 @@ Branch: `feat/ide-workspace-v3`
 - **Tool Selection Engine:** Designed an interactive, state-driven agent loop with real-time tool selection (file read, search, file write, edit, delete, git actions, terminal execution, etc.) dynamically powered by LLM tool routing.
 - **Frontend Live Progress UI:** Overhauled the web dashboard to render an elegant Execution Plan Progress component, including custom step status icons, active step highlight animations, retry badges, and real-time step status styling.
 
+### Phase 9: Multi-Agent Architecture (v0.5.0)
+
+A provider-independent, security-preserving multi-agent layer added **on top of** the existing stable architecture. The original `Agent._loop()` remains the default; the new orchestration path is opt-in via `MULTI_AGENT_ENABLED=true`.
+
+- **7 Specialized Agents:** `PlannerAgent`, `RepositoryAgent`, `CodingAgent`, `TerminalAgent`, `TestingAgent`, `GitAgent`, `ReviewAgent` — each a `BaseAgent` subclass that self-registers via the `@register_agent` decorator.
+- **Agent Coordinator:** A state-machine orchestrator (`AgentCoordinator`) that decides which agent runs next, routes structured `AgentMessage` objects between agents, enforces an iteration budget (`MAX_ITERATIONS=30`) and a fix-round cap (`MAX_FIX_ROUNDS=2`), and supports feedback loops (testing→coding, review→coding).
+- **Structured Communication:** Agents communicate exclusively through the typed `AgentMessage` dataclass (sender, recipient, content, role, priority, payload) and return structured `AgentResult` objects. There is no free-form agent chatter.
+- **Provider-Independent:** No agent imports a concrete provider; they accept an object conforming to the `AIProvider` protocol. Deterministic fallbacks exist for every agent so the architecture makes progress without an API key.
+- **Security Preserved:** Every agent that touches the filesystem or runs commands goes through the existing `Workspace.safe_path()`/`write_file()` and `terminal.run_command()`/`validate_command()` layers — path-traversal and command-injection protections are inherited, not duplicated.
+- **UI-Compatible:** The coordinator streams real events through the existing `EventType` enum and `EventBus` via an `emit` callback, so the frontend renders the multi-agent run with no UI changes required.
+- **Non-Breaking Integration:** `backend/agent.py` gained an opt-in `_run_via_coordinator()` path gated by `settings.multi_agent_enabled` (defaults to `False`). The existing single-agent loop is untouched.
+
+**New files:** `agents/__init__.py`, `agents/base.py`, `agents/registry.py`, `agents/coordinator.py`, `agents/planner_agent.py`, `agents/repository_agent.py`, `agents/coding_agent.py`, `agents/terminal_agent.py`, `agents/testing_agent.py`, `agents/git_agent.py`, `agents/review_agent.py`, `tests/test_agent_base.py`, `tests/test_coordinator.py`, `tests/test_specialized_agents.py`.
+**Modified files:** `backend/agent.py` (opt-in coordinator path), `backend/config.py` (`multi_agent_enabled` flag), `BUILD_REPORT.md`.
+
 ---
 
 ## Files Changed
@@ -83,11 +98,17 @@ Branch: `feat/ide-workspace-v3`
 
 ## Tests Executed & Results
 
-All 114 tests passed successfully:
+All 166 tests passed successfully (114 original + 52 new multi-agent tests):
 ```bash
 python3 -m pytest
-======================= 114 passed, 1 warning in 14.88s ========================
+======================= 166 passed, 1 warning in 14.30s ========================
 ```
+
+The 52 new tests are organized into three files:
+
+- `tests/test_agent_base.py` (17 tests) — structured messaging protocol, result/context dataclasses, BaseAgent cancellation & error-handling contract, and registry self-registration.
+- `tests/test_coordinator.py` (17 tests) — coordinator state machine, happy-path routing, testing→coding and review→coding feedback loops, fix-round cap, iteration budget, cancellation, missing-agent handling, and message construction.
+- `tests/test_specialized_agents.py` (18 tests) — each of the 7 specialized agents against a real temp workspace + local provider, plus a full end-to-end coordinator run on a real git-initialized workspace and security containment checks.
 
 ---
 

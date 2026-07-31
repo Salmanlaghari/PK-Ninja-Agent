@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # Terminal safety
     command_timeout_seconds: int = Field(default=30, alias="COMMAND_TIMEOUT_SECONDS")
 
+    # ── Multi-Agent Architecture (opt-in, Phase 9) ────────────────────────────
+    # When True, the agent loop delegates orchestration to the AgentCoordinator
+    # (agents.coordinator) which runs the 7 specialized agents. Defaults to
+    # False so the original single-agent loop remains the stable default and
+    # the UI/API surface is unchanged.
+    multi_agent_enabled: bool = Field(default=False, alias="MULTI_AGENT_ENABLED")
+
     @property
     def workspace_root_path(self) -> Path:
         p = Path(self.workspace_root).resolve()
