@@ -59,11 +59,20 @@ class Workspace:
     """A per-task sandboxed directory rooted at ``workspace_root/<task_id>``."""
 
     def __init__(self, task_id: str, root: Optional[Path] = None,
-                 settings: Optional[Settings] = None) -> None:
+                 settings: Optional[Settings] = None,
+                 repo_full: Optional[str] = None) -> None:
         self.task_id = task_id
         self.settings = settings or get_settings()
         base = root or self.settings.workspace_root_path
-        self.root = (base / task_id).resolve()
+
+        # Resolve directory name: persistent repo-based name or fallback to task_id
+        target_repo = repo_full or self.settings.github_repo_full()
+        if target_repo:
+            dir_name = "repo_" + target_repo.replace("/", "__").replace("\\", "__")
+        else:
+            dir_name = task_id
+
+        self.root = (base / dir_name).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     # ── Path safety ────────────────────────────────────────────────────────
@@ -278,3 +287,37 @@ class Workspace:
 
     def git_log_oneline(self, n: int = 5) -> str:
         return self._git(["log", f"-{n}", "--oneline"]).stdout
+
+    def git_list_branches(self) -> List[str]:
+        res = self._git(["branch", "-a"])
+        if not res.success:
+            return []
+        branches = []
+        for line in res.stdout.splitlines():
+            line = line.strip().lstrip("*").strip()
+            if line:
+                branches.append(line)
+        return branches
+
+    def git_checkout(self, branch: str, create: bool = False) -> CommandResult:
+        # Validate branch name first
+        if not create:
+            # Switch to existing branch
+            return self._git(["checkout", branch])
+        # Validate ref format for creation
+        check = self._git(["check-ref-format", "--branch", branch])
+        if not check.success:
+            raise WorkspaceError(f"Invalid branch name: {branch!r}")
+        return self._git(["checkout", "-b", branch])
+
+    def git_stage_file(self, rel_path: str) -> CommandResult:
+        p = self.safe_path(rel_path)  # Sandbox containment check
+        return self._git(["add", rel_path])
+
+    def git_unstage_file(self, rel_path: str) -> CommandResult:
+        p = self.safe_path(rel_path)  # Sandbox containment check
+        return self._git(["reset", "HEAD", rel_path])
+
+    def git_discard_file(self, rel_path: str) -> CommandResult:
+        p = self.safe_path(rel_path)  # Sandbox containment check
+        return self._git(["checkout", "--", rel_path])

@@ -10,7 +10,12 @@ def client():
     # Import after env is set by conftest.
     from backend.main import app, init_db
     import asyncio
-    asyncio.get_event_loop().run_until_complete(init_db())
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
     with TestClient(app) as c:
         yield c
 
