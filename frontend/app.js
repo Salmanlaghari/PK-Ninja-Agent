@@ -1883,14 +1883,36 @@ Workspaces.init();
 Providers.init();
 Dashboard.init();
 
+// ── Loading / error helpers (v0.7.0 release prep) ────────────────────────────
+const UI = (() => {
+  function showLoading(msg) {
+    const el = $("app-loading");
+    if (el) { el.innerHTML = '<span class="app-loading-dot"></span> ' + (msg || "Loading…"); el.hidden = false; }
+  }
+  function hideLoading() { const el = $("app-loading"); if (el) el.hidden = true; }
+  let toastTimer = null;
+  function showError(msg) {
+    const el = $("app-error-toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 5000);
+  }
+  return { showLoading, hideLoading, showError };
+})();
+window.UI = UI;
+
 async function bootApp() {
+  UI.showLoading("Connecting…");
   const enabled = await Auth.checkStatus();
   // After a deferred login completes, run the rest of the app init.
   Auth.onAuthSuccessHook = () => {
     loadRepo(); loadProvider(); loadProviders(); loadTasks();
-    initMobileTabState(); setStatus("idle", "Idle");
+    initMobileTabState(); setStatus("idle", "Idle"); UI.hideLoading();
   };
   if (enabled && !Auth.getToken()) {
+    UI.hideLoading();
     Auth.showLogin();
     return; // app init deferred until login succeeds
   }
@@ -1901,6 +1923,7 @@ async function bootApp() {
   loadTasks();
   initMobileTabState();
   setStatus("idle", "Idle");
+  UI.hideLoading();
 }
 
 bootApp();

@@ -268,6 +268,28 @@ settings = get_settings()
 
 app = FastAPI(title="PK Ninja Agent", version="0.7.0")
 
+# ── Error handlers (v0.7.0 release prep) ──────────────────────────────────────
+@app.exception_handler(404)
+async def _not_found_handler(request: Request, exc):
+    """Return JSON for API routes; serve SPA index for non-API (frontend) routes."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        return JSONResponse(status_code=404, content={"detail": "Not found", "path": path})
+    # SPA fallback: serve index.html so client-side routing works.
+    idx = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+    if idx.exists():
+        return FileResponse(str(idx), status_code=200)
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+
+@app.exception_handler(500)
+async def _server_error_handler(request: Request, exc):
+    """Log internal errors without leaking stack traces to the client."""
+    log.error("internal error on %s: %s", request.url.path, exc)
+    env = getattr(get_settings(), "app_env", "development")
+    detail = "Internal server error" if env == "production" else f"Internal server error: {exc}"
+    return JSONResponse(status_code=500, content={"detail": detail})
+
 # ── Auth dependency (v0.7.0) ────────────────────────────────────────────────
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -590,10 +612,20 @@ BUS.set_persist(_persist)
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
+    s = get_settings()
+    env = getattr(s, "app_env", "development")
+    # Production-safety warnings (non-blocking).
+    if env == "production":
+        if getattr(s, "debug", False):
+            log.warning("PRODUCTION SAFETY: DEBUG=true is not recommended in production.")
+        if not getattr(s, "auth_enabled", False):
+            log.warning("PRODUCTION SAFETY: AUTH_ENABLED=false in production — dashboard is unprotected.")
+        if not getattr(s, "auth_secret", ""):
+            log.warning("PRODUCTION SAFETY: AUTH_SECRET is empty — sessions cannot be signed securely.")
     # Run release-prep startup checks (v0.7.0).
     try:
         from release_checks import run_startup_checks
-        checks = run_startup_checks(settings)
+        checks = run_startup_checks(s)
         for chk in checks:
             if chk.get("status") == "warn":
                 log.warning("startup check: %s — %s", chk.get("name"), chk.get("detail"))
@@ -602,7 +634,7 @@ async def _startup() -> None:
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
     log.info("PK Ninja Agent v0.7.0 started (env=%s). DB at %s",
-             getattr(settings, "app_env", "development"), settings.db_path)
+             env, s.db_path)
 
 
 # ── Health ──────────────────────────────────────────────────────────────

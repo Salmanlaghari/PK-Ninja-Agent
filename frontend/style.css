@@ -1094,6 +1094,29 @@ header {
   pointer-events: none;
 }
 
+/* Loading banner + error toast (v0.7.0 release prep) */
+.app-loading {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px; font-size: 12px;
+  background: rgba(88,166,255,0.12); color: #58a6ff;
+  border-bottom: 1px solid rgba(88,166,255,0.3);
+}
+.app-loading-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #58a6ff; animation: app-loading-pulse 1s ease-in-out infinite;
+}
+@keyframes app-loading-pulse {
+  0%, 100% { opacity: 0.3; } 50% { opacity: 1; }
+}
+.app-error-toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 9999; max-width: 90vw; padding: 10px 16px;
+  background: rgba(248,81,73,0.15); color: #f85149;
+  border: 1px solid rgba(248,81,73,0.4); border-radius: 6px;
+  font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
 /* ============================================================= */
 /* v0.7.0 — Settings modal                                        */
 /* ============================================================= */
