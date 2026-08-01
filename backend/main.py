@@ -71,6 +71,8 @@ from workspace import Workspace, WorkspaceError
 # v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
 from scheduler import (QueueStatus, TaskScheduler, get_scheduler,
                        init_scheduler, reset_scheduler)
+from worker import (BackgroundWorker, get_worker, init_worker,
+                    reset_worker, stop_worker)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -615,18 +617,27 @@ def _persist(event) -> None:
 BUS.set_persist(_persist)
 
 
-# v0.8.0 — Eagerly (re)initialise the scheduler singleton at module load so the
-# app works even if the startup hook hasn't run yet (e.g. under test reload).
-# When SCHEDULER_ENABLED=false (default) the singleton stays None and the
+# v0.8.0 — Eagerly (re)initialise the scheduler + worker singletons at module
+# load so the app works even if the startup hook hasn't run yet (e.g. under
+# test reload). When SCHEDULER_ENABLED=false (default) both stay None and the
 # original fire-and-forget start_task() path is preserved.
 def _init_scheduler_from_settings() -> None:
     _s = get_settings()
     if getattr(_s, "scheduler_enabled", False):
-        init_scheduler(
+        sched = init_scheduler(
             default_priority=getattr(_s, "scheduler_default_priority", 5),
             default_retries=getattr(_s, "scheduler_default_retries", 1),
         )
+        # Start the background worker so queued tasks get drained automatically.
+        init_worker(
+            sched,
+            start_task,
+            max_concurrency=getattr(_s, "worker_max_concurrency", 2),
+            poll_interval=getattr(_s, "worker_poll_interval_seconds", 1.0),
+            autostart=True,
+        )
     else:
+        reset_worker()
         reset_scheduler()
 
 
@@ -659,19 +670,27 @@ async def _startup() -> None:
         log.warning("startup checks skipped: %s", exc)
     log.info("PK Ninja Agent v0.8.0 started (env=%s). DB at %s",
              env, s.db_path)
-    # v0.8.0 — Autonomous Execution Engine: initialise the scheduler singleton
+    # v0.8.0 — Autonomous Execution Engine: initialise the scheduler + worker
     # when opted in. When disabled (default), the original fire-and-forget
     # start_task() path is preserved for full backward compatibility.
     if getattr(s, "scheduler_enabled", False):
-        init_scheduler(
+        sched = init_scheduler(
             default_priority=getattr(s, "scheduler_default_priority", 5),
             default_retries=getattr(s, "scheduler_default_retries", 1),
         )
-        log.info("Autonomous scheduler ENABLED (priority=%s retries=%s concurrency=%s)",
+        init_worker(
+            sched,
+            start_task,
+            max_concurrency=getattr(s, "worker_max_concurrency", 2),
+            poll_interval=getattr(s, "worker_poll_interval_seconds", 1.0),
+            autostart=True,
+        )
+        log.info("Autonomous scheduler+worker ENABLED (priority=%s retries=%s concurrency=%s)",
                  getattr(s, "scheduler_default_priority", 5),
                  getattr(s, "scheduler_default_retries", 1),
                  getattr(s, "worker_max_concurrency", 2))
     else:
+        reset_worker()
         reset_scheduler()
 
 
@@ -1361,6 +1380,20 @@ async def api_queue_get(task_id: str) -> TaskQueueItem:
     if item is None:
         raise HTTPException(404, "Task not found in queue")
     return TaskQueueItem(**item.to_dict())
+
+
+@app.get("/api/worker")
+async def api_worker_status() -> dict:
+    """Report background worker status (opt-in; reports disabled when off)."""
+    fresh = get_settings()
+    w = get_worker()
+    if w is None:
+        return {"enabled": False, "running": False, "active": 0,
+                "max_concurrency": getattr(fresh, "worker_max_concurrency", 2),
+                "completed": 0, "failed": 0}
+    return {"enabled": True, "running": w.is_running, "active": w.active_count,
+            "max_concurrency": getattr(fresh, "worker_max_concurrency", 2),
+            "completed": w.completed_count, "failed": w.failed_count}
 
 
 # ── Frontend ────────────────────────────────────────────────────────────
