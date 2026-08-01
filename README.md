@@ -467,3 +467,144 @@ The full suite grew from 231 tests (v0.6.0) to **314 tests** across these new fi
 | `tests/test_release_prep.py` | 14 | Error handlers, health endpoints, release-checks module, frontend UI, no-secret-leak |
 
 All 231 pre-existing tests continue to pass unchanged.
+
+---
+
+## 14. v0.8.0 — Autonomous Execution Engine
+
+The v0.8.0 release transforms PK Ninja Agent from an interactive coding agent into a true **autonomous coding platform**. It adds a priority task scheduler, a background worker that executes tasks independently of the HTTP request, persistent workspace sessions, a live execution monitor, a crash-recovery system, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer. Every feature is **opt-in and backward compatible**: with all new flags at their defaults, the app behaves exactly as v0.7.0.
+
+### Design principles
+
+- **Do not rebuild.** All new modules are layered on top of the stable v0.7.0 codebase. No existing file was replaced or had functionality removed.
+- **Backward compatible by default.** `SCHEDULER_ENABLED=false`, `SECURITY_HARDENING_ENABLED=false`, and `RECOVERY_AUTO_RESUME=false` preserve v0.7.0 behavior. Existing tests pass unchanged.
+- **No secrets in responses.** The secret-leak guard (tests checking for `api_key`, `token`, `password`, `secret` substrings) covers every new endpoint.
+
+### Task Scheduler (Phase 1)
+
+A priority task queue in `backend/scheduler.py` that manages multiple queued tasks with priority ordering, pause/resume/cancel/retry, and reorder operations.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/queue` | GET | List all queued tasks (sorted by priority) |
+| `/api/queue/enqueue` | POST | Enqueue a task with a priority |
+| `/api/queue/{task_id}/pause` | POST | Pause a queued task |
+| `/api/queue/{task_id}/resume` | POST | Resume a paused task |
+| `/api/queue/{task_id}/cancel` | POST | Cancel a queued task |
+| `/api/queue/{task_id}/retry` | POST | Retry a failed task |
+| `/api/queue/reorder` | POST | Reorder tasks in the queue |
+
+When `SCHEDULER_ENABLED=false` (default), `POST /api/tasks` starts the task directly — unchanged v0.7.0 behavior.
+
+### Background Worker (Phase 2)
+
+A background worker in `backend/worker.py` that drains the scheduler queue and executes tasks in daemon threads, independent of the HTTP request lifecycle. Tasks continue running even if the client disconnects. Concurrency is capped by `WORKER_MAX_CONCURRENCY` (default 2).
+
+### Workspace Sessions (Phase 3)
+
+Persistent repository sessions in `backend/sessions.py` that link task IDs to workspace directories, branches, and repo context. A new task can restore a previous session to reuse the same workspace directory and branch.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/sessions` | GET | List all sessions |
+| `/api/sessions/{task_id}` | GET | Get session details |
+| `/api/sessions/{task_id}/restore` | POST | Restore a session (reuse workspace) |
+| `/api/sessions/{task_id}/close` | POST | Close a session |
+
+### Execution Monitor (Phase 4)
+
+A live execution monitor in `backend/monitor.py` that reports CPU usage, memory usage, running commands, task duration, and estimated completion time. Powered by `psutil` (soft dependency — degrades gracefully when not installed).
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/monitor` | GET | Live system + per-task metrics |
+
+### Recovery System (Phase 5)
+
+A crash-recovery system in `backend/recovery.py` that detects interrupted tasks (status=running but no live runtime), resumes them safely, and preserves all event logs. When `RECOVERY_AUTO_RESUME=false` (default), interrupted tasks are detected and reported but not automatically resumed.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/recovery` | GET | Detect interrupted tasks |
+| `/api/recovery/{task_id}/resume` | POST | Resume an interrupted task |
+| `/api/recovery/{task_id}/mark-failed` | POST | Mark an interrupted task as failed |
+
+### Job History (Phase 6)
+
+A searchable job history in `backend/history.py` — a read-only query layer over the existing `tasks` + `events` tables. Search by description or event message; filter by repository, status, and date range; paginate with event previews.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/history` | GET | Search + filter job history |
+| `/api/history/{task_id}` | GET | Full job detail with event log |
+| `/api/history-stats` | GET | Aggregate stats (by status, by repo) |
+
+### Export (Phase 7)
+
+Multi-format export in `backend/exporter.py` — a pure transformation layer with no database access or side effects. Export single-task logs as JSON, text, or markdown report; export filtered history as JSON or CSV.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/export/{task_id}` | GET | Export single task (json / text / markdown) |
+| `/api/export-history` | GET | Export filtered history (json / csv) |
+
+### Performance (Phase 8)
+
+Indexing optimizations in `backend/indexing.py`:
+
+- **mtime + size fast path** — a single `os.stat()` call retrieves both mtime and file size. If both match the cached values, the file is skipped without re-reading or hashing. This eliminates redundant file I/O on re-index.
+- **Batched upserts** — file and symbol rows are accumulated and flushed via `executemany`, reducing SQLite round-trips.
+- **Schema migration** — the `size` column is added to `repo_files` via an idempotent `ALTER TABLE` (checked with `PRAGMA table_info`). Existing databases are migrated transparently on first index.
+- The cache now stores `(hash, mtime, size)` tuples; the return contract (`{added, updated, deleted, total}`) is unchanged.
+
+### Security Hardening (Phase 9)
+
+A security module in `backend/security.py` with three hardening areas:
+
+1. **Workspace validation** (`validate_workspace`) — walks the workspace directory and checks that no symlinks escape the workspace root, no directories are world-writable, the workspace is contained within `WORKSPACE_ROOT`, and the file count does not exceed `SECURITY_MAX_WORKSPACE_FILES`.
+2. **Destructive-argument containment** (`check_destructive_args`) — inspects the arguments of `rm`, `mv`, `cp`, and `rmdir` and blocks attempts to target the workspace root (`rm -rf .`, `rm -rf *`), parent traversal (`../../`), or absolute paths outside the workspace.
+3. **Sensitive-file protection** (`is_sensitive_path`) — detects `.env` files, SSH private keys, certificate extensions (`.pem`, `.key`, `.p12`, `.pfx`), credential files, and API-key substrings in filenames.
+
+Additionally, 15 extra blocklist patterns (`EXTRA_BLOCKED_PATTERNS`) supplement the existing terminal blocklist: `rm -rf ~`, `chmod -R 777`, `chown -R`, `cat /etc/shadow`, `nc` listener, `crontab`, `systemctl`, `export SECRET=`, SSH `authorized_keys` injection, and more.
+
+The `full_command_check` function provides an integrated pipeline: extra blocklist → existing terminal validation → destructive-argument containment.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/security/workspace/{name}` | GET | Validate a workspace for safety |
+| `/api/security/check-command` | POST | Dry-run validate a command (no execution) |
+| `/api/security/sensitive-path` | POST | Check if a path looks sensitive |
+| `/api/security/status` | GET | Current security configuration (no secrets) |
+
+When `SECURITY_HARDENING_ENABLED=true`, the `/api/tasks/{task_id}/run` endpoint runs the full security pipeline before executing any command.
+
+### New environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SCHEDULER_ENABLED` | `false` | Enable the priority task scheduler |
+| `SCHEDULER_DEFAULT_RETRIES` | `1` | Default retry count for failed tasks |
+| `SCHEDULER_DEFAULT_PRIORITY` | `5` | Default priority for enqueued tasks |
+| `WORKER_MAX_CONCURRENCY` | `2` | Maximum concurrent worker tasks |
+| `WORKER_POLL_INTERVAL_SECONDS` | `1.0` | Worker queue poll interval |
+| `RECOVERY_AUTO_RESUME` | `false` | Auto-resume interrupted tasks on startup |
+| `SECURITY_HARDENING_ENABLED` | `false` | Enable the enhanced security pipeline |
+| `SECURITY_MAX_WORKSPACE_FILES` | `200000` | Max files scanned by workspace validation |
+
+### Test coverage
+
+The full suite grew from 314 tests (v0.7.0) to **524 tests** across these new files:
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/test_scheduler.py` | 29 | Priority queue, enqueue, pause/resume/cancel/retry/reorder, opt-in |
+| `tests/test_worker.py` | 13 | Worker loop, concurrency limit, independent execution |
+| `tests/test_sessions.py` | 14 | Session create/restore/close, repo context reuse |
+| `tests/test_monitor.py` | 16 | CPU/memory metrics, running commands, ETA, psutil fallback |
+| `tests/test_recovery.py` | 16 | Interrupted detection, resume, mark-failed, log preservation |
+| `tests/test_history.py` | 28 | Search, filters, pagination, event previews, stats, API |
+| `tests/test_export.py` | 21 | JSON/text/markdown/CSV export, API, no-secret-leak |
+| `tests/test_indexing_perf.py` | 8 | Fast path, schema migration, batched correctness, read avoidance |
+| `tests/test_security_hardening.py` | 65 | Sensitive paths, destructive args, extra blocklist, workspace validation, API |
+
+All 314 pre-existing tests continue to pass unchanged.

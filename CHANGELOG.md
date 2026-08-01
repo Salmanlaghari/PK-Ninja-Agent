@@ -2,6 +2,71 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — Autonomous Execution Engine
+
+The release that transforms PK Ninja Agent from an interactive coding agent into a true **autonomous coding platform**. It adds a task scheduler, background worker, persistent workspace sessions, a live execution monitor, a crash-recovery system, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer. Every feature is **opt-in and backward compatible** — with all new flags at their defaults, the app behaves exactly as v0.7.0.
+
+### Added
+
+#### Task Scheduler (Phase 1)
+- Priority task queue (`backend/scheduler.py`) with enqueue, pause, resume, cancel, retry, and reorder operations.
+- `SCHEDULER_ENABLED` (default `false`), `SCHEDULER_DEFAULT_RETRIES`, `SCHEDULER_DEFAULT_PRIORITY` configuration.
+- New endpoints: `GET /api/queue`, `POST /api/queue/enqueue`, `POST /api/queue/{task_id}/pause`, `POST /api/queue/{task_id}/resume`, `POST /api/queue/{task_id}/cancel`, `POST /api/queue/{task_id}/retry`, `POST /api/queue/reorder`.
+- When `SCHEDULER_ENABLED=false` (default), `POST /api/tasks` starts the task directly (unchanged v0.7.0 behavior).
+
+#### Background Worker (Phase 2)
+- Background worker (`backend/worker.py`) that drains the scheduler queue and executes tasks independently of the HTTP request lifecycle.
+- `WORKER_MAX_CONCURRENCY` (default 2), `WORKER_POLL_INTERVAL_SECONDS` (default 1.0) configuration.
+- Daemon-thread execution; tasks continue running even if the client disconnects.
+
+#### Workspace Sessions (Phase 3)
+- Persistent repository sessions (`backend/sessions.py`) that link task IDs to workspace directories, branches, and repo context.
+- New endpoints: `GET /api/sessions`, `GET /api/sessions/{task_id}`, `POST /api/sessions/{task_id}/restore`, `POST /api/sessions/{task_id}/close`.
+- Session restoration reuses an existing workspace directory and branch context for a new task.
+
+#### Execution Monitor (Phase 4)
+- Live execution monitor (`backend/monitor.py`) with CPU usage, memory usage, running commands, task duration, and estimated completion — powered by `psutil` (soft dependency with graceful fallback).
+- New endpoint: `GET /api/monitor` (live system + per-task metrics).
+
+#### Recovery System (Phase 5)
+- Crash-recovery system (`backend/recovery.py`) that detects interrupted tasks (status=running but no live runtime), resumes safely, and preserves all event logs.
+- `RECOVERY_AUTO_RESUME` (default `false`) configuration.
+- New endpoints: `GET /api/recovery`, `POST /api/recovery/{task_id}/resume`, `POST /api/recovery/{task_id}/mark-failed`.
+
+#### Job History (Phase 6)
+- Searchable job history (`backend/history.py`) — a read-only query layer over the existing `tasks` + `events` tables.
+- Search by description or event message; filter by repository, status, and date range; pagination with event previews.
+- New endpoints: `GET /api/history`, `GET /api/history/{task_id}`, `GET /api/history-stats`.
+
+#### Export (Phase 7)
+- Multi-format export (`backend/exporter.py`) — a pure transformation layer (no DB, no side effects).
+- Export single-task logs as JSON, text, or markdown report; export filtered history as JSON or CSV.
+- New endpoints: `GET /api/export/{task_id}`, `GET /api/export-history`.
+
+#### Performance (Phase 8)
+- Indexing optimizations (`backend/indexing.py`): mtime + size fast path (skip unchanged files without re-reading via a single `os.stat`), batched upserts/deletes via `executemany`, idempotent schema migration (`ALTER TABLE repo_files ADD COLUMN size`).
+- Cache now stores `(hash, mtime, size)` tuples; same return contract (`{added, updated, deleted, total}`).
+
+#### Security Hardening (Phase 9)
+- Security module (`backend/security.py`) with three hardening areas: workspace validation (symlink-escape detection, world-writable directory check, root containment, file-count limit), destructive-argument containment (blocks `rm -rf .`, `rm -rf *`, parent traversal, absolute paths for `rm`/`mv`/`cp`/`rmdir`), and sensitive-file protection (detects `.env`, SSH keys, certificate extensions, credential files, API-key substrings).
+- 15 additional blocklist patterns (`EXTRA_BLOCKED_PATTERNS`): `rm -rf ~`, `chmod -R 777`, `chown -R`, `cat /etc/shadow`, `nc` listener, `crontab`, `systemctl`, `export SECRET=`, SSH `authorized_keys` injection, etc.
+- `full_command_check` integrated pipeline (extra blocklist + terminal validation + destructive-arg containment).
+- `SECURITY_HARDENING_ENABLED` (default `false`), `SECURITY_MAX_WORKSPACE_FILES` (default 200,000) configuration.
+- New endpoints: `GET /api/security/workspace/{name}`, `POST /api/security/check-command`, `POST /api/security/sensitive-path`, `GET /api/security/status`.
+
+### Tests
+- Test count grew from **314** (v0.7.0) to **524**.
+- New test files: `tests/test_scheduler.py` (29), `tests/test_worker.py` (13), `tests/test_sessions.py` (14), `tests/test_monitor.py` (16), `tests/test_recovery.py` (16), `tests/test_history.py` (28), `tests/test_export.py` (21), `tests/test_indexing_perf.py` (8), `tests/test_security_hardening.py` (65).
+- All 314 pre-existing tests pass unchanged.
+
+### Backward Compatibility
+- `SCHEDULER_ENABLED=false` (default) → tasks start directly, no queue.
+- `SECURITY_HARDENING_ENABLED=false` (default) → existing `terminal.validate_command` is the only guard.
+- `RECOVERY_AUTO_RESUME=false` (default) → interrupted tasks detected but not auto-resumed.
+- All existing endpoints, models, and frontend panels retained.
+
+---
+
 ## [0.7.0] — Beta: Product & Deployment Phase
 
 The release that transforms PK Ninja Agent from a development prototype into a real beta product. Every new feature is opt-in and backward compatible — with all new flags at their defaults, the app behaves exactly as v0.6.0.
