@@ -77,6 +77,7 @@ from worker import (BackgroundWorker, get_worker, init_worker,
 from sessions import (close_session as _close_session, create_session,
                       delete_session as _delete_session, find_active_for_repo,
                       get_session, list_sessions, touch_session)
+from monitor import monitor_snapshot, psutil_available, system_metrics
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -1476,6 +1477,34 @@ async def api_sessions_delete(session_id: str) -> dict:
     if not ok:
         raise HTTPException(404, "Session not found")
     return {"deleted": True, "session_id": session_id}
+
+
+# ── Autonomous Execution Engine — Execution Monitor (v0.8.0) ───────────────
+
+@app.get("/api/monitor")
+async def api_monitor() -> dict:
+    """Live execution monitor: system CPU/memory + per-task metrics.
+
+    Always returns 200 even when psutil is unavailable (metrics report
+    ``unavailable`` in that case).
+    """
+    runtimes = list_runtimes()
+    rows = await db_list_tasks()
+    rows_by_id = {r["task_id"]: r for r in rows}
+    # gather recent events for each live runtime (bounded)
+    events_by_id: dict = {}
+    for rt in runtimes:
+        try:
+            events_by_id[rt.task_id] = await db_list_events(rt.task_id)
+        except Exception:  # noqa: BLE001
+            events_by_id[rt.task_id] = []
+    return monitor_snapshot(runtimes, rows_by_id, events_by_id)
+
+
+@app.get("/api/monitor/system")
+async def api_monitor_system() -> dict:
+    """System-wide resource metrics only (lightweight poll)."""
+    return system_metrics()
 
 
 # ── Frontend ────────────────────────────────────────────────────────────
