@@ -1,0 +1,87 @@
+# Roadmap
+
+This document tracks the planned evolution of PK Ninja Agent from the current beta toward a stable v1.0.0 and beyond. Progress is tracked against the version milestones below.
+
+---
+
+## Current State: v0.7.0 Beta
+
+PK Ninja Agent v0.7.0 is a feature-complete beta. It includes authentication, persistent settings, a workspace manager, a provider management UI, a dashboard, release-prep hardening (error pages, loading states, health monitoring, startup checks), and full documentation. The test suite stands at 314 passing tests, all backward compatible with v0.6.0.
+
+The remaining work before v1.0.0 is focused on hardening, real-world validation, and a few production-grade features that are intentionally deferred from the beta.
+
+---
+
+## v1.0.0 — Stable Release
+
+The goal of v1.0.0 is to ship a stable, production-ready coding agent that small teams can self-host with confidence.
+
+### Authentication hardening
+- **OAuth flow.** Replace token-based GitHub login with a proper OAuth app flow (callback, state validation, refresh tokens) for multi-user deployments. The current token-based verification is suitable for single-user/small-team beta but is not ideal for broader use.
+- **Server-side session revocation.** The current sessions are stateless HMAC tokens; v1.0.0 should add an optional server-side session store (SQLite) to support explicit revocation and session listing.
+- **Rate limiting.** Add per-user rate limiting on auth endpoints to mitigate brute-force attempts.
+- **CSRF protection.** Add CSRF tokens for state-changing endpoints when cookie-based auth is introduced.
+
+### Authorization & multi-tenancy
+- **Role-based access control.** Introduce roles (admin, contributor, viewer) and per-workspace permissions for multi-user deployments.
+- **Workspace isolation.** Enforce per-user workspace ownership so users cannot access or modify each other's workspaces.
+
+### Deployment & operations
+- **Containerization.** Provide an official Dockerfile and docker-compose setup with sensible production defaults.
+- **Configuration validation.** Add strict environment validation at startup (fail fast on missing required secrets in production) with clear error messages.
+- **Metrics & observability.** Add structured logging (JSON) and optional Prometheus/OpenTelemetry metrics export for task latency, provider health, and error rates.
+- **Database migrations.** Introduce a lightweight migration system (or move to Alembic) so schema changes are versioned and reproducible.
+
+### AI provider ecosystem
+- **Streaming-first providers.** Ensure all built-in adapters implement true streaming (SSE) end-to-end, including tool-calling providers.
+- **Provider configuration UI.** Allow setting API keys and base URLs per provider from the settings UI (stored encrypted server-side), so users do not need shell access to configure providers.
+- **Additional adapters.** Add Anthropic (Claude) and Mistral adapters following the existing adapter pattern.
+
+### Testing & quality
+- **Integration test suite.** Add end-to-end integration tests that exercise the full agent loop (create task → plan → edit → verify → diff) against a real local workspace with the `local` provider.
+- **Load testing.** Validate concurrent task handling and SSE/WebSocket stability under load.
+- **Test coverage reporting.** Wire up coverage reporting in CI.
+
+### Documentation
+- **User guide.** A dedicated user guide covering first-run setup, workspace management, provider configuration, and common workflows.
+- **Admin guide.** Deployment, configuration, and operations documentation for self-hosters.
+- **API reference.** Auto-generated API reference (e.g. via FastAPI's OpenAPI schema export).
+
+---
+
+## v1.1.0+ — Future Directions
+
+Ideas and directions for post-1.0 development. These are exploratory and not committed.
+
+### Agent capabilities
+- **Autonomous PR lifecycle.** End-to-end autonomous branch, PR creation, CI observation, and self-merge after review.
+- **Multi-repo tasks.** Tasks that span multiple repositories (cross-repo refactoring, dependency updates).
+- **Long-running background agents.** Scheduled or triggered agents that run without an active browser session (e.g. nightly dependency audits).
+- **Agent memory persistence.** Long-term memory of past tasks, decisions, and learned patterns across sessions.
+
+### Collaboration
+- **Shared workspaces.** Workspaces shared between users with real-time collaboration indicators.
+- **Task assignment & comments.** Assign tasks to users and add comments/discussion threads.
+- **Activity feed.** A team-wide activity feed of tasks, commits, and PRs.
+
+### UX
+- **Theme system.** Full theme support (the settings model already has theme fields; wire up the actual CSS theme switching).
+- **Keyboard shortcuts.** Power-user keyboard navigation for the IDE workspace.
+- **Mobile-first polish.** Continue improving the mobile experience (the current mobile tab navigation is a starting point).
+
+### Ecosystem
+- **Plugin marketplace.** A mechanism for third-party provider and tool plugins.
+- **Webhook integrations.** Outbound webhooks for task lifecycle events (started, completed, failed) to integrate with Slack, Discord, etc.
+- **CLI companion.** A `pkninja` CLI that can create tasks and observe progress from the terminal.
+
+---
+
+## Versioning Policy
+
+PK Ninja Agent follows [Semantic Versioning](https://semver.org/):
+
+- **MAJOR** (e.g. 1.0.0): Breaking changes or the first stable release.
+- **MINOR** (e.g. 0.7.0): New backward-compatible features.
+- **PATCH** (e.g. 0.7.1): Backward-compatible bug fixes.
+
+While in 0.x, minor versions may include breaking changes (pre-1.0 software). Once 1.0.0 is reached, breaking changes require a major version bump.
