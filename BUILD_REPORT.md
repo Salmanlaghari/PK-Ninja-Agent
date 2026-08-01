@@ -389,6 +389,7 @@ Backward compatibility verified: all 231 original tests pass unchanged with `AUT
 ## Status: ✅ Complete, Verified & Backward-Compatible
 
 Branch: `feat/autonomous-execution-v0.8.0` (off `main` at `494bc38`)
+Pull Request: [#9 — feat: v0.8.0 — Autonomous Execution Engine](https://github.com/Salmanlaghari/PK-Ninja-Agent/pull/9)
 
 The **Autonomous Execution Engine** release layers a priority task scheduler, background worker, persistent workspace sessions, a live execution monitor, crash-recovery, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer on top of the stable v0.7.0 codebase — no existing functionality removed, no architecture replaced, full backward compatibility preserved by opt-in defaults (`SCHEDULER_ENABLED=false`, `SECURITY_HARDENING_ENABLED=false`, `RECOVERY_AUTO_RESUME=false`).
 
