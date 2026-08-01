@@ -443,3 +443,23 @@ class HistoryStatsOut(BaseModel):
     by_status: Dict[str, int] = Field(default_factory=dict)
     by_repo: Dict[str, int] = Field(default_factory=dict)
     total_events: int = 0
+
+
+# ── v0.8.0 Export models ───────────────────────────────────────────────────
+class ExportRequest(BaseModel):
+    """Export a single task's logs or report."""
+
+    task_id: str
+    format: str = Field(default="json", description="json | text | markdown")
+
+
+class ExportHistoryRequest(BaseModel):
+    """Export the filtered task history as JSON or CSV."""
+
+    format: str = Field(default="json", description="json | csv")
+    repo: Optional[str] = None
+    status: Optional[str] = None
+    search: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    limit: int = Field(default=100, ge=1, le=500)

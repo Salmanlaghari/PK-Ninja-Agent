@@ -36,7 +36,8 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -57,7 +58,8 @@ from workspace_manager import (WorkspaceManagerError, create_workspace,
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
-                    HistoryDetailOut, HistoryListOut, HistoryStatsOut,
+                    ExportRequest, ExportHistoryRequest, HistoryDetailOut,
+                    HistoryListOut, HistoryStatsOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
                     ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
@@ -83,6 +85,9 @@ from monitor import monitor_snapshot, psutil_available, system_metrics
 from recovery import (detect_interrupted, mark_task_failed, recovery_summary,
                       resume_task)
 from history import (get_job_detail, history_stats, query_history)
+from exporter import (export_history_csv, export_history_json,
+                      export_logs_json, export_logs_text,
+                      export_report_markdown)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -1598,6 +1603,57 @@ async def api_history_detail(task_id: str) -> dict:
 async def api_history_stats() -> dict:
     """Aggregate statistics over the entire task history."""
     return await history_stats()
+
+
+# -- v0.8.0 Export -----------------------------------------------------------
+@app.get("/api/export/{task_id}")
+async def api_export_task(task_id: str, format: str = "json") -> Response:
+    """Export a single task's logs or report.
+
+    ``format``: ``json`` (structured log), ``text`` (line log),
+    ``markdown`` (executive summary report).
+    """
+    detail = await get_job_detail(task_id)
+    if not detail:
+        raise HTTPException(404, "Task not found in history")
+    events = detail.get("events", [])
+    fmt = (format or "json").lower()
+    if fmt == "text":
+        content = export_logs_text(detail, events)
+        media = "text/plain"
+    elif fmt == "markdown":
+        content = export_report_markdown(detail, events)
+        media = "text/markdown"
+    else:
+        content = export_logs_json(detail, events)
+        media = "application/json"
+    return Response(content=content, media_type=media)
+
+
+@app.get("/api/export-history")
+async def api_export_history(
+    format: str = "json",
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+) -> Response:
+    """Export the filtered task history as JSON or CSV."""
+    result = await query_history(
+        repo=repo, status=status, search=search,
+        date_from=date_from, date_to=date_to,
+        limit=limit, offset=0,
+    )
+    fmt = (format or "json").lower()
+    if fmt == "csv":
+        content = export_history_csv(result["items"])
+        media = "text/csv"
+    else:
+        content = export_history_json(result["items"], result["count"])
+        media = "application/json"
+    return Response(content=content, media_type=media)
 
 
 # ── Frontend ────────────────────────────────────────────────────────────
