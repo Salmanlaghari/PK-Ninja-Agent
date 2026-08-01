@@ -36,7 +36,8 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -57,14 +58,42 @@ from workspace_manager import (WorkspaceManagerError, create_workspace,
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
+                    ExportRequest, ExportHistoryRequest, HistoryDetailOut,
+                    HistoryListOut, HistoryStatsOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
-                    ProviderInfoOut, ProviderManagerStatusOut, SessionOut,
-                    SettingsOut, SettingsUpdate, SystemHealthComponent,
-                    SystemHealthOut, TaskCreate, TaskStatus, TaskSummary,
-                    UserOut, WorkspaceActionRequest, WorkspaceCreateRequest,
-                    WorkspaceOut, WorkspaceRenameRequest, normalize_status)
+                    ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
+                    QueueListOut, RecoveryActionRequest, RecoverySummaryOut,
+                    ReorderRequest, RetryRequest, SessionActionRequest,
+                    SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
+                    SystemHealthComponent, SystemHealthOut, TaskCreate,
+                    TaskQueueItem, TaskStatus, TaskSummary, UserOut,
+                    WorkspaceActionRequest, WorkspaceCreateRequest,
+                    WorkspaceOut, WorkspaceRenameRequest,
+                    WorkspaceSessionListOut, WorkspaceSessionOut,
+                    CommandCheckOut, CommandCheckRequest,
+                    SensitivePathOut, SensitivePathRequest,
+                    WorkspaceValidationOut, normalize_status)
 from workspace import Workspace, WorkspaceError
+
+# v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
+from scheduler import (QueueStatus, TaskScheduler, get_scheduler,
+                       init_scheduler, reset_scheduler)
+from worker import (BackgroundWorker, get_worker, init_worker,
+                    reset_worker, stop_worker)
+from sessions import (close_session as _close_session, create_session,
+                      delete_session as _delete_session, find_active_for_repo,
+                      get_session, list_sessions, touch_session)
+from monitor import monitor_snapshot, psutil_available, system_metrics
+from recovery import (detect_interrupted, mark_task_failed, recovery_summary,
+                      resume_task)
+from history import (get_job_detail, history_stats, query_history)
+from exporter import (export_history_csv, export_history_json,
+                      export_logs_json, export_logs_text,
+                      export_report_markdown)
+from security import (WorkspaceValidationResult, check_extra_blocked,
+                      full_command_check, is_sensitive_path,
+                      validate_workspace)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -86,6 +115,9 @@ async def _db() -> aiosqlite.Connection:
     # Ensure schema exists on every connection (idempotent + defensive so the
     # app works even if the startup hook hasn't run yet, e.g. under reload).
     await conn.executescript(_SCHEMA_SQL)
+    # v0.8.0: ensure the sessions table exists too (idempotent).
+    from sessions import ensure_sessions_schema
+    await ensure_sessions_schema(conn)
     await conn.commit()
     return conn
 
@@ -266,7 +298,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.7.0")
+app = FastAPI(title="PK Ninja Agent", version="0.8.0")
 
 # ── Error handlers (v0.7.0 release prep) ──────────────────────────────────────
 @app.exception_handler(404)
@@ -565,7 +597,7 @@ async def api_system_health() -> dict:
     sh = _system_health(get_settings())
     return SystemHealthOut(
         status=sh.get("status", "unknown"),
-        version=sh.get("version", "0.7.0"),
+        version=sh.get("version", "0.8.0"),
         environment=sh.get("environment", "development"),
         components=[SystemHealthComponent(**c) for c in sh.get("components", [])],
         startup_checks=sh.get("components", []),
@@ -609,6 +641,33 @@ def _persist(event) -> None:
 BUS.set_persist(_persist)
 
 
+# v0.8.0 — Eagerly (re)initialise the scheduler + worker singletons at module
+# load so the app works even if the startup hook hasn't run yet (e.g. under
+# test reload). When SCHEDULER_ENABLED=false (default) both stay None and the
+# original fire-and-forget start_task() path is preserved.
+def _init_scheduler_from_settings() -> None:
+    _s = get_settings()
+    if getattr(_s, "scheduler_enabled", False):
+        sched = init_scheduler(
+            default_priority=getattr(_s, "scheduler_default_priority", 5),
+            default_retries=getattr(_s, "scheduler_default_retries", 1),
+        )
+        # Start the background worker so queued tasks get drained automatically.
+        init_worker(
+            sched,
+            start_task,
+            max_concurrency=getattr(_s, "worker_max_concurrency", 2),
+            poll_interval=getattr(_s, "worker_poll_interval_seconds", 1.0),
+            autostart=True,
+        )
+    else:
+        reset_worker()
+        reset_scheduler()
+
+
+_init_scheduler_from_settings()
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
@@ -633,14 +692,36 @@ async def _startup() -> None:
                 log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
-    log.info("PK Ninja Agent v0.7.0 started (env=%s). DB at %s",
+    log.info("PK Ninja Agent v0.8.0 started (env=%s). DB at %s",
              env, s.db_path)
+    # v0.8.0 — Autonomous Execution Engine: initialise the scheduler + worker
+    # when opted in. When disabled (default), the original fire-and-forget
+    # start_task() path is preserved for full backward compatibility.
+    if getattr(s, "scheduler_enabled", False):
+        sched = init_scheduler(
+            default_priority=getattr(s, "scheduler_default_priority", 5),
+            default_retries=getattr(s, "scheduler_default_retries", 1),
+        )
+        init_worker(
+            sched,
+            start_task,
+            max_concurrency=getattr(s, "worker_max_concurrency", 2),
+            poll_interval=getattr(s, "worker_poll_interval_seconds", 1.0),
+            autostart=True,
+        )
+        log.info("Autonomous scheduler+worker ENABLED (priority=%s retries=%s concurrency=%s)",
+                 getattr(s, "scheduler_default_priority", 5),
+                 getattr(s, "scheduler_default_retries", 1),
+                 getattr(s, "worker_max_concurrency", 2))
+    else:
+        reset_worker()
+        reset_scheduler()
 
 
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.7.0"}
+    return {"status": "ok", "version": "0.8.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────
@@ -829,6 +910,19 @@ async def api_create_task(body: TaskCreate) -> dict:
     fresh = get_settings()
     repo = body.repository or fresh.github_repo_full()
     await db_create_task(task_id, body.description, repo)
+    # v0.8.0: when the autonomous scheduler is enabled, enqueue the task so the
+    # background worker picks it up by priority. Otherwise (default) keep the
+    # original fire-and-forget behaviour for full backward compatibility.
+    sched = get_scheduler()
+    if sched is not None and getattr(fresh, "scheduler_enabled", False):
+        item = sched.enqueue(
+            task_id=task_id,
+            description=body.description,
+            repo_full=repo,
+            enqueued_at=_dt.datetime.utcnow().timestamp(),
+        )
+        return {"task_id": task_id, "status": item.status.value,
+                "repository": repo, "queued": True}
     start_task(task_id, body.description, repo_full=repo)
     return {"task_id": task_id, "status": TaskStatus.running.value,
             "repository": repo}
@@ -1052,6 +1146,19 @@ async def api_run_command(task_id: str, body: RunCommandRequest) -> dict:
     rt = get_runtime(task_id)
     if not rt or not rt.workspace:
         raise HTTPException(404, "Task workspace not found")
+    # v0.8.0: when security hardening is enabled, run the enhanced pipeline
+    # (extra blocklist + destructive-arg containment) before execution.
+    s = get_settings()
+    if s.security_hardening_enabled:
+        allowed, reason, _issues = full_command_check(
+            body.command, workspace_root=rt.workspace.root
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=400,
+                content={"command": body.command, "error": reason,
+                         "success": False, "returncode": 126},
+            )
     try:
         result = _run(body.command, rt.workspace, rt=rt)
         return {
@@ -1217,7 +1324,437 @@ async def api_pr_create(body: PRPrepareRequest) -> dict:
         raise HTTPException(400, str(exc))
 
 
+# ── Autonomous Execution Engine — Task Scheduler (v0.8.0) ──────────────────
+
+def _scheduler_or_404() -> TaskScheduler:
+    """Return the active scheduler or raise 404 when the feature is disabled."""
+    sched = get_scheduler()
+    if sched is None:
+        raise HTTPException(
+            404,
+            "Task scheduler is disabled. Set SCHEDULER_ENABLED=true to enable "
+            "the autonomous execution engine.",
+        )
+    return sched
+
+
+@app.get("/api/queue")
+async def api_queue_list() -> QueueListOut:
+    fresh = get_settings()
+    sched = get_scheduler()
+    if sched is None:
+        return QueueListOut(
+            enabled=bool(getattr(fresh, "scheduler_enabled", False)),
+            queue=[], queue_length=0, running_count=0,
+            max_concurrency=getattr(fresh, "worker_max_concurrency", 2),
+        )
+    items = sched.list_items()
+    return QueueListOut(
+        enabled=True,
+        queue=[TaskQueueItem(**i.to_dict()) for i in items],
+        queue_length=sched.queue_length(),
+        running_count=sched.running_count(),
+        max_concurrency=getattr(fresh, "worker_max_concurrency", 2),
+    )
+
+
+@app.post("/api/queue/pause")
+async def api_queue_pause(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.pause(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/resume")
+async def api_queue_resume(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.resume(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/cancel")
+async def api_queue_cancel(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.cancel(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    # Best-effort: also cancel the live runtime if the task is already running.
+    try:
+        cancel_task(body.task_id)
+    except Exception:  # noqa: BLE001
+        pass
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/retry")
+async def api_queue_retry(body: RetryRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.retry(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    if body.priority is not None:
+        item = sched.reorder(body.task_id, body.priority)
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/reorder")
+async def api_queue_reorder(body: ReorderRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.reorder(body.task_id, body.priority)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.get("/api/queue/{task_id}")
+async def api_queue_get(task_id: str) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.get(task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.get("/api/worker")
+async def api_worker_status() -> dict:
+    """Report background worker status (opt-in; reports disabled when off)."""
+    fresh = get_settings()
+    w = get_worker()
+    if w is None:
+        return {"enabled": False, "running": False, "active": 0,
+                "max_concurrency": getattr(fresh, "worker_max_concurrency", 2),
+                "completed": 0, "failed": 0}
+    return {"enabled": True, "running": w.is_running, "active": w.active_count,
+            "max_concurrency": getattr(fresh, "worker_max_concurrency", 2),
+            "completed": w.completed_count, "failed": w.failed_count}
+
+
+# ── Autonomous Execution Engine — Workspace Sessions (v0.8.0) ──────────────
+
+@app.get("/api/sessions")
+async def api_sessions_list(
+    repo_full: Optional[str] = None,
+    state: Optional[str] = None,
+) -> WorkspaceSessionListOut:
+    fresh = get_settings()
+    items = await list_sessions(
+        Path(fresh.db_path), repo_full=repo_full, state=state,
+    )
+    return WorkspaceSessionListOut(
+        sessions=[WorkspaceSessionOut(**i) for i in items], count=len(items),
+    )
+
+
+@app.post("/api/sessions")
+async def api_sessions_create(body: SessionCreateRequest) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    # If an active session for this repo already exists, reuse it (touch + return)
+    existing = await find_active_for_repo(Path(fresh.db_path), body.repo_full)
+    if existing is not None:
+        updated = await touch_session(
+            Path(fresh.db_path), existing["session_id"],
+            branch=body.branch, task_id=body.task_id,
+            description=body.description,
+        )
+        return WorkspaceSessionOut(**(updated or existing))
+    created = await create_session(
+        Path(fresh.db_path),
+        repo_full=body.repo_full, workspace=body.workspace,
+        branch=body.branch, task_id=body.task_id, description=body.description,
+    )
+    return WorkspaceSessionOut(**created)
+
+
+@app.get("/api/sessions/{session_id}")
+async def api_sessions_get(session_id: str) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    sess = await get_session(Path(fresh.db_path), session_id)
+    if sess is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**sess)
+
+
+@app.post("/api/sessions/{session_id}/restore")
+async def api_sessions_restore(session_id: str) -> WorkspaceSessionOut:
+    """Mark a closed/interrupted session active again (reuse workspace)."""
+    fresh = get_settings()
+    updated = await touch_session(
+        Path(fresh.db_path), session_id, state="active",
+    )
+    if updated is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**updated)
+
+
+@app.post("/api/sessions/{session_id}/close")
+async def api_sessions_close(session_id: str) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    closed = await _close_session(Path(fresh.db_path), session_id)
+    if closed is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**closed)
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_sessions_delete(session_id: str) -> dict:
+    fresh = get_settings()
+    ok = await _delete_session(Path(fresh.db_path), session_id)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    return {"deleted": True, "session_id": session_id}
+
+
+# ── Autonomous Execution Engine — Execution Monitor (v0.8.0) ───────────────
+
+@app.get("/api/monitor")
+async def api_monitor() -> dict:
+    """Live execution monitor: system CPU/memory + per-task metrics.
+
+    Always returns 200 even when psutil is unavailable (metrics report
+    ``unavailable`` in that case).
+    """
+    runtimes = list_runtimes()
+    rows = await db_list_tasks()
+    rows_by_id = {r["task_id"]: r for r in rows}
+    # gather recent events for each live runtime (bounded)
+    events_by_id: dict = {}
+    for rt in runtimes:
+        try:
+            events_by_id[rt.task_id] = await db_list_events(rt.task_id)
+        except Exception:  # noqa: BLE001
+            events_by_id[rt.task_id] = []
+    return monitor_snapshot(runtimes, rows_by_id, events_by_id)
+
+
+@app.get("/api/monitor/system")
+async def api_monitor_system() -> dict:
+    """System-wide resource metrics only (lightweight poll)."""
+    return system_metrics()
+
+
+# ── Autonomous Execution Engine — Recovery System (v0.8.0) ─────────────────
+
+@app.get("/api/recovery")
+async def api_recovery_detect() -> dict:
+    """Detect interrupted tasks (live status but no in-memory runtime)."""
+    interrupted = await detect_interrupted(db_list_tasks, lambda tid: get_runtime(tid) is not None)
+    fresh = get_settings()
+    summary = recovery_summary(interrupted)
+    summary["auto_resume"] = bool(getattr(fresh, "recovery_auto_resume", False))
+    summary["interrupted"] = interrupted
+    return summary
+
+
+@app.post("/api/recovery/mark-failed")
+async def api_recovery_mark_failed(body: RecoveryActionRequest) -> dict:
+    """Mark an interrupted task as failed (terminal). Preserves logs."""
+    rt = get_runtime(body.task_id)
+    if rt is not None:
+        raise HTTPException(409, "Task still has a live runtime; cancel it first.")
+    row = await db_get_task(body.task_id)
+    if not row:
+        raise HTTPException(404, "Task not found")
+
+    async def _update(tid: str, status: str) -> None:
+        await db_update_task_status(tid, TaskStatus(status), branch=None)
+
+    await mark_task_failed(_update, body.task_id,
+                           reason=body.reason or "interrupted")
+    return {"task_id": body.task_id, "status": "failed",
+            "reason": body.reason or "interrupted"}
+
+
+@app.post("/api/recovery/resume")
+async def api_recovery_resume(body: RecoveryActionRequest) -> dict:
+    """Re-run an interrupted task from scratch (fresh execution, reused context)."""
+    rt = get_runtime(body.task_id)
+    if rt is not None:
+        raise HTTPException(409, "Task already has a live runtime.")
+    row = await db_get_task(body.task_id)
+    if not row:
+        raise HTTPException(404, "Task not found")
+    repo = row.get("repo") or ""
+    desc = row.get("description") or ""
+    resume_task(body.task_id, desc, repo, start_task)
+    return {"task_id": body.task_id, "status": "running", "resumed": True}
+
+
+# -- v0.8.0 Job History ------------------------------------------------------
+@app.get("/api/history")
+async def api_history(
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_events: int = 0,
+) -> dict:
+    """Searchable, filterable job history over the tasks + events tables."""
+    result = await query_history(
+        repo=repo,
+        status=status,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+        include_events=include_events,
+    )
+    return result
+
+
+@app.get("/api/history/{task_id}")
+async def api_history_detail(task_id: str) -> dict:
+    """Full detail for one historical job including its event log."""
+    detail = await get_job_detail(task_id)
+    if not detail:
+        raise HTTPException(404, "Task not found in history")
+    return detail
+
+
+@app.get("/api/history-stats")
+async def api_history_stats() -> dict:
+    """Aggregate statistics over the entire task history."""
+    return await history_stats()
+
+
+# -- v0.8.0 Export -----------------------------------------------------------
+@app.get("/api/export/{task_id}")
+async def api_export_task(task_id: str, format: str = "json") -> Response:
+    """Export a single task's logs or report.
+
+    ``format``: ``json`` (structured log), ``text`` (line log),
+    ``markdown`` (executive summary report).
+    """
+    detail = await get_job_detail(task_id)
+    if not detail:
+        raise HTTPException(404, "Task not found in history")
+    events = detail.get("events", [])
+    fmt = (format or "json").lower()
+    if fmt == "text":
+        content = export_logs_text(detail, events)
+        media = "text/plain"
+    elif fmt == "markdown":
+        content = export_report_markdown(detail, events)
+        media = "text/markdown"
+    else:
+        content = export_logs_json(detail, events)
+        media = "application/json"
+    return Response(content=content, media_type=media)
+
+
+@app.get("/api/export-history")
+async def api_export_history(
+    format: str = "json",
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+) -> Response:
+    """Export the filtered task history as JSON or CSV."""
+    result = await query_history(
+        repo=repo, status=status, search=search,
+        date_from=date_from, date_to=date_to,
+        limit=limit, offset=0,
+    )
+    fmt = (format or "json").lower()
+    if fmt == "csv":
+        content = export_history_csv(result["items"])
+        media = "text/csv"
+    else:
+        content = export_history_json(result["items"], result["count"])
+        media = "application/json"
+    return Response(content=content, media_type=media)
+
+
 # ── Frontend ────────────────────────────────────────────────────────────
+
+# v0.8.0 Phase 9: Security hardening endpoints
+
+
+@app.get("/api/security/workspace/{name}")
+async def api_validate_workspace(name: str) -> WorkspaceValidationOut:
+    """Validate a named workspace for safety (symlinks, permissions, containment).
+
+    Walks the workspace directory and checks that no symlinks escape the
+    workspace root, no directories are world-writable, and the workspace
+    is contained within the configured ``workspace_root``.
+    """
+    s = get_settings()
+    # Resolve the workspace path the same way workspace_manager does.
+    from workspace_manager import _path as _wm_path
+    try:
+        ws_dir = _wm_path(s, name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not ws_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Workspace '{name}' not found.")
+    try:
+        result = validate_workspace(
+            ws_dir,
+            workspace_root=str(s.workspace_root),
+            max_files=s.security_max_workspace_files,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceValidationOut(
+        valid=result.valid,
+        root=result.root,
+        issues=result.issues,
+        checked_files=result.checked_files,
+        checked_dirs=result.checked_dirs,
+        symlinks=result.symlinks,
+    )
+
+
+@app.post("/api/security/check-command")
+async def api_check_command(req: CommandCheckRequest) -> CommandCheckOut:
+    """Dry-run validate a command against the full security pipeline.
+
+    Runs the extra blocklist, existing terminal validation, and destructive-
+    argument containment.  Does **not** execute the command.
+    """
+    s = get_settings()
+    ws_root = None
+    if s.security_hardening_enabled:
+        ws_root = Path(s.workspace_root).resolve()
+    allowed, reason, issues = full_command_check(
+        req.command, workspace_root=ws_root
+    )
+    return CommandCheckOut(allowed=allowed, reason=reason, issues=issues)
+
+
+@app.post("/api/security/sensitive-path")
+async def api_sensitive_path(req: SensitivePathRequest) -> SensitivePathOut:
+    """Check whether a path looks like a sensitive file (secrets/keys)."""
+    return SensitivePathOut(
+        sensitive=is_sensitive_path(req.path), path=req.path
+    )
+
+
+@app.get("/api/security/status")
+async def api_security_status() -> dict:
+    """Return the current security configuration (no secrets)."""
+    import security as _sec
+    s = get_settings()
+    return {
+        "security_hardening_enabled": s.security_hardening_enabled,
+        "max_workspace_files": s.security_max_workspace_files,
+        "command_timeout_seconds": s.command_timeout_seconds,
+        "extra_blocked_patterns": len(_sec.EXTRA_BLOCKED_PATTERNS),
+        "sensitive_patterns": len(_sec.SENSITIVE_PATTERNS),
+        "destructive_programs": sorted(_sec.DESTRUCTIVE_PROGRAMS),
+    }
+
+
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 
 

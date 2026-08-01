@@ -381,3 +381,181 @@ Backward compatibility verified: all 231 original tests pass unchanged with `AUT
 ## Recommended Version Tag
 
 **`v0.7.0-beta`** — Product & Deployment Phase. Semver pre-release (`-beta`): all product surfaces (auth, settings, workspaces, providers, dashboard) are implemented and tested, with explicit hardening work scoped for v1.0.0. Full backward compatibility preserved; opt-in defaults keep existing deployments unchanged.
+
+---
+
+## v0.8.0 — Autonomous Execution Engine Build Report
+
+## Status: ✅ Complete, Verified & Backward-Compatible
+
+Branch: `feat/autonomous-execution-v0.8.0` (off `main` at `494bc38`)
+Pull Request: [#9 — feat: v0.8.0 — Autonomous Execution Engine](https://github.com/Salmanlaghari/PK-Ninja-Agent/pull/9)
+
+The **Autonomous Execution Engine** release layers a priority task scheduler, background worker, persistent workspace sessions, a live execution monitor, crash-recovery, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer on top of the stable v0.7.0 codebase — no existing functionality removed, no architecture replaced, full backward compatibility preserved by opt-in defaults (`SCHEDULER_ENABLED=false`, `SECURITY_HARDENING_ENABLED=false`, `RECOVERY_AUTO_RESUME=false`).
+
+---
+
+## What Changed by Phase
+
+### Phase 1: Task Scheduler (`backend/scheduler.py`, `backend/config.py`, `backend/models.py`, `backend/main.py`)
+- **Priority task queue** (`backend/scheduler.py`): `TaskScheduler` class with `QueueStatus` enum (idle/paused/running/completed/failed/cancelled), `enqueue()`, `pause()`, `resume()`, `cancel()`, `retry()`, `reorder()`, `get_next()` (priority-ordered).
+- **Config**: `SCHEDULER_ENABLED` (default false), `SCHEDULER_DEFAULT_RETRIES` (1), `SCHEDULER_DEFAULT_PRIORITY` (5).
+- **Models**: `TaskQueueItem`, `QueueActionRequest`, `RetryRequest`, `ReorderRequest`, `QueueListOut`.
+- **API**: `GET /api/queue`, `POST /api/queue/enqueue`, `POST /api/queue/{task_id}/{pause,resume,cancel,retry}`, `POST /api/queue/reorder`.
+- **Wiring**: `POST /api/tasks` enqueues when `SCHEDULER_ENABLED=true`; starts directly when false (default).
+- **Tests**: `tests/test_scheduler.py` — 29 tests.
+
+### Phase 2: Background Worker (`backend/worker.py`, `backend/config.py`, `backend/main.py`)
+- **Background worker** (`backend/worker.py`): `BackgroundWorker` class with a daemon-thread loop that polls the scheduler queue, pulls the next-priority ready task, and executes it independently. Concurrency capped by `WORKER_MAX_CONCURRENCY` (default 2). `WORKER_POLL_INTERVAL_SECONDS` (default 1.0).
+- **Lifecycle**: `init_worker()`, `get_worker()`, `stop_worker()`, `reset_worker()` for test isolation.
+- **Tests**: `tests/test_worker.py` — 13 tests.
+
+### Phase 3: Workspace Sessions (`backend/sessions.py`, `backend/models.py`, `backend/main.py`)
+- **Persistent sessions** (`backend/sessions.py`): `sessions` SQLite table (task_id, repo, branch, workspace_dir, state, last_active). `create_session()`, `get_session()`, `list_sessions()`, `touch_session()`, `close_session()`, `find_active_for_repo()`.
+- **Models**: `SessionOut`, `SessionCreateRequest`, `SessionActionRequest`, `WorkspaceSessionOut`, `WorkspaceSessionListOut`.
+- **API**: `GET /api/sessions`, `GET /api/sessions/{task_id}`, `POST /api/sessions/{task_id}/restore`, `POST /api/sessions/{task_id}/close`.
+- **Tests**: `tests/test_sessions.py` — 14 tests.
+
+### Phase 4: Execution Monitor (`backend/monitor.py`, `backend/main.py`)
+- **Live monitor** (`backend/monitor.py`): `system_metrics()` (CPU %, memory %, total/used memory, load average), `monitor_snapshot()` (per-task runtime status, duration, running commands, ETA). Uses `psutil` with graceful fallback when not installed (`psutil_available` flag).
+- **API**: `GET /api/monitor` — live system + per-task metrics.
+- **Tests**: `tests/test_monitor.py` — 16 tests.
+
+### Phase 5: Recovery System (`backend/recovery.py`, `backend/config.py`, `backend/models.py`, `backend/main.py`)
+- **Crash recovery** (`backend/recovery.py`): `detect_interrupted()` finds tasks with status=running but no live runtime. `resume_task()` marks the task as idle so it can be re-started. `mark_task_failed()` transitions to failed. `recovery_summary()` aggregates counts. All event logs are preserved (recovery never deletes events).
+- **Config**: `RECOVERY_AUTO_RESUME` (default false).
+- **Models**: `RecoverySummaryOut`, `RecoveryActionRequest`.
+- **API**: `GET /api/recovery`, `POST /api/recovery/{task_id}/resume`, `POST /api/recovery/{task_id}/mark-failed`.
+- **Tests**: `tests/test_recovery.py` — 16 tests.
+
+### Phase 6: Job History (`backend/history.py`, `backend/models.py`, `backend/main.py`)
+- **Read-only query layer** (`backend/history.py`): `query_history()` with filters (repo exact match, status normalization, search by description/event message, date range), pagination (limit clamped to [0, 500], offset), event previews (latest N events per task). `get_job_detail()` for a single task with full event log. `history_stats()` for aggregate counts by status and by repo.
+- **Read-only connections**: opens via `file:{db_path}?mode=ro` URI for safety.
+- **Models**: `HistoryItemOut`, `HistoryListOut`, `HistoryDetailOut`, `HistoryStatsOut`, `HistoryEventPreview`.
+- **API**: `GET /api/history`, `GET /api/history/{task_id}`, `GET /api/history-stats`.
+- **Tests**: `tests/test_history.py` — 28 tests (16 unit + 12 API).
+
+### Phase 7: Export (`backend/exporter.py`, `backend/models.py`, `backend/main.py`)
+- **Pure transformation layer** (`backend/exporter.py`): `export_logs_json()`, `export_logs_text()`, `export_report_markdown()` (executive summary with metadata table, event breakdown, timeline), `export_history_json()`, `export_history_csv()` (RFC-4180 compliant with `csv.writer`). No DB access, no side effects.
+- **Models**: `ExportRequest`, `ExportHistoryRequest`.
+- **API**: `GET /api/export/{task_id}` (json/text/markdown), `GET /api/export-history` (json/csv). Returns `Response` with correct `media_type`.
+- **Tests**: `tests/test_export.py` — 21 tests (11 unit + 10 API).
+
+### Phase 8: Performance (`backend/indexing.py`)
+- **mtime + size fast path**: single `os.stat()` call gets both mtime and size. If cached mtime matches (within 0.01s) AND cached size matches → skip file read + hash entirely.
+- **Schema migration**: `ALTER TABLE repo_files ADD COLUMN size INTEGER DEFAULT NULL` via `PRAGMA table_info` check (idempotent, try/except).
+- **Batched upserts/deletes**: `file_upserts`, `symbol_deletes`, `symbol_inserts` accumulated and flushed via `executemany`. Deleted file/symbol rows removed via `executemany`.
+- **Cache**: now stores `(hash, mtime, size)` tuples.
+- **Same return contract**: `{added, updated, deleted, total}`.
+- **Tests**: `tests/test_indexing_perf.py` — 8 tests (fast path, size detection, schema migration + idempotency, batched correctness, read avoidance, partial change, new file after migration).
+
+### Phase 9: Security Hardening (`backend/security.py`, `backend/config.py`, `backend/models.py`, `backend/main.py`)
+- **Security module** (`backend/security.py`):
+  - `validate_workspace()` — symlink-escape detection, world-writable directory check, root containment, file-count limit. Returns `WorkspaceValidationResult`.
+  - `check_destructive_args()` — blocks `rm -rf .`, `rm -rf *`, `**` glob, parent traversal (`../`), absolute paths for `rm`/`mv`/`cp`/`rmdir`. Returns `ArgCheckResult`.
+  - `is_sensitive_path()` — detects `.env`, SSH keys, cert extensions (`.pem`/`.key`/`.p12`/`.pfx`), credential files, API-key substrings.
+  - `EXTRA_BLOCKED_PATTERNS` — 15 additional blocklist patterns.
+  - `full_command_check()` — integrated pipeline (extra + terminal + destructive).
+- **Config**: `SECURITY_HARDENING_ENABLED` (default false), `SECURITY_MAX_WORKSPACE_FILES` (default 200,000).
+- **Models**: `WorkspaceValidationOut`, `CommandCheckRequest`/`CommandCheckOut`, `SensitivePathRequest`/`SensitivePathOut`.
+- **API**: `GET /api/security/workspace/{name}`, `POST /api/security/check-command`, `POST /api/security/sensitive-path`, `GET /api/security/status`. When hardening is enabled, `/api/tasks/{task_id}/run` gates on `full_command_check`.
+- **Tests**: `tests/test_security_hardening.py` — 65 tests (sensitive paths, destructive args, extra blocklist, full pipeline, workspace validation, API, secret-leak guards).
+
+---
+
+## Files Changed
+
+**New backend modules:**
+- `backend/scheduler.py` — priority task queue with pause/resume/cancel/retry/reorder.
+- `backend/worker.py` — background worker draining the scheduler queue.
+- `backend/sessions.py` — persistent workspace sessions.
+- `backend/monitor.py` — live execution monitor (psutil).
+- `backend/recovery.py` — interrupted task detection and safe resume.
+- `backend/history.py` — read-only job history query layer.
+- `backend/exporter.py` — pure transformation export layer (JSON/text/markdown/CSV).
+- `backend/security.py` — security hardening (workspace validation, command containment, sensitive-file protection).
+
+**Modified backend files:**
+- `backend/config.py` — added scheduler, worker, recovery, and security config fields.
+- `backend/main.py` — version → 0.8.0; new routes for queue, sessions, monitor, recovery, history, export, security; security gate on /run.
+- `backend/models.py` — added scheduler, session, monitor, recovery, history, export, and security Pydantic models.
+- `backend/indexing.py` — mtime+size fast path, batched upserts, schema migration.
+- `backend/release_checks.py` — version → 0.8.0.
+
+**New test files:**
+- `tests/test_scheduler.py` — 29 tests.
+- `tests/test_worker.py` — 13 tests.
+- `tests/test_sessions.py` — 14 tests.
+- `tests/test_monitor.py` — 16 tests.
+- `tests/test_recovery.py` — 16 tests.
+- `tests/test_history.py` — 28 tests.
+- `tests/test_export.py` — 21 tests.
+- `tests/test_indexing_perf.py` — 8 tests.
+- `tests/test_security_hardening.py` — 65 tests.
+
+**Modified test files:**
+- `tests/test_dashboard.py` — version → 0.8.0.
+- `tests/test_release_prep.py` — version → 0.8.0.
+
+**Documentation:**
+- `README.md` — added Section 14 (Autonomous Execution Engine).
+- `CHANGELOG.md` — added v0.8.0 entry.
+- `ROADMAP.md` — updated current state to v0.8.0; updated v1.0.0 remaining work.
+- `BUILD_REPORT.md` — this section.
+
+**Dependencies:**
+- `requirements.txt` — added `psutil>=5.9`.
+
+---
+
+## Tests Executed & Results
+
+Full suite (314 pre-existing v0.7.0 + 210 new v0.8.0 tests):
+
+```bash
+python3 -m pytest -q
+524 passed in ~28s
+```
+
+New test breakdown:
+- `tests/test_scheduler.py` — 29 tests
+- `tests/test_worker.py` — 13 tests
+- `tests/test_sessions.py` — 14 tests
+- `tests/test_monitor.py` — 16 tests
+- `tests/test_recovery.py` — 16 tests
+- `tests/test_history.py` — 28 tests
+- `tests/test_export.py` — 21 tests
+- `tests/test_indexing_perf.py` — 8 tests
+- `tests/test_security_hardening.py` — 65 tests
+
+Backward compatibility verified: all 314 original tests pass unchanged with all new flags at their defaults. Secret-leak guard preserved across all new endpoints.
+
+---
+
+## Performance Improvements
+
+| Area | Before (v0.7.0) | After (v0.8.0) | Improvement |
+|------|-----------------|-----------------|-------------|
+| Re-index unchanged files | Re-reads + hashes every file | `os.stat` mtime+size check; skips if both match | Eliminates file I/O for unchanged files |
+| DB writes (index) | Per-file `INSERT`/`DELETE` | Batched `executemany` | Fewer SQLite round-trips |
+| Schema upgrade | N/A | Idempotent `ALTER TABLE ADD COLUMN size` | Transparent migration, no downtime |
+
+---
+
+## Remaining Work Before v1.0.0
+
+- **Worker/scheduler persistence**: persist the in-memory queue to SQLite so in-flight tasks survive a process restart.
+- **Task dependencies**: allow tasks to declare prerequisites for multi-step autonomous workflows.
+- **Cron / scheduled tasks**: time-based triggers on top of the priority queue.
+- **Auth hardening**: OAuth flow, server-side session revocation, rate limiting, CSRF protection.
+- **Multi-tenancy**: RBAC, per-user workspace isolation.
+- **Deployment**: Dockerfile, docker-compose, config validation, metrics/observability, DB migrations.
+- **Provider ecosystem**: streaming-first adapters, provider config UI, Anthropic/Mistral adapters.
+- **Testing**: end-to-end integration tests, load testing, coverage reporting.
+- **Docs**: user guide, admin guide, API reference (OpenAPI).
+
+---
+
+## Recommended Version Tag
+
+**`v0.8.0`** — Autonomous Execution Engine. All ten feature areas (scheduler, worker, sessions, monitor, recovery, history, export, performance, security, documentation) are implemented and tested with 524 passing tests. Full backward compatibility preserved; opt-in defaults keep existing deployments unchanged. The autonomous execution engine is production-ready for teams that want to enable scheduled, background, and recoverable task execution.

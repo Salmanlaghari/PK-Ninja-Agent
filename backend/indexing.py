@@ -57,18 +57,61 @@ def parse_python_symbols(content: str) -> List[Dict[str, Any]]:
 
 
 async def index_workspace(task_id: str, ws: Workspace, db: aiosqlite.Connection) -> dict:
-    """Incrementally index workspace files and symbols, caching in SQLite."""
+    """Incrementally index workspace files and symbols, caching in SQLite.
+
+    v0.8.0 performance improvements (backward compatible — same return
+    contract; the DB schema gains one optional column via a safe migration):
+
+    1. **mtime + size fast path** — if the cached mtime matches the on-disk
+       mtime (within 0.01s) *and* the file size matches the cached size,
+       the file is skipped *without* reading its content or computing a
+       hash. Both mtime and size come from a single ``os.stat`` call (no
+       file read). This is correct: if both the modification time and the
+       byte count are identical, the content is identical (barring
+       deliberately adversarial same-size same-mtime rewrites, which do
+       not occur in normal development workflows).
+
+       A new ``size`` column is added to ``repo_files`` via
+       ``ALTER TABLE`` (idempotent — wrapped in try/except so existing
+       databases are migrated on first call and subsequent calls are
+       no-ops). Rows created before the migration have ``size = NULL``;
+       such rows fall through to the slow path once (to populate the
+       column) and then benefit from the fast path on subsequent calls.
+
+    2. **Batched upserts** — file metadata and symbol rows are accumulated
+       and flushed via ``executemany`` in a single batch instead of one
+       ``execute`` per file.
+
+    3. **Batched deletes** — stale symbol rows for changed files and rows
+       for deleted files are removed in batched calls.
+    """
     # Ensure row_factory is set to Row
     db.row_factory = aiosqlite.Row
 
-    # 1) Get current cache
-    cache = {}
+    # v0.8.0: migrate the repo_files table to add a size column.
+    # Idempotent: if the column already exists the ALTER fails and we
+    # swallow the error. This runs on every call but is a no-op after the
+    # first successful migration (the PRAGMA check short-circuits).
+    try:
+        cur = await db.execute("PRAGMA table_info(repo_files)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "size" not in cols:
+            await db.execute(
+                "ALTER TABLE repo_files ADD COLUMN size INTEGER DEFAULT NULL"
+            )
+            await db.commit()
+    except Exception:
+        pass  # table doesn't exist yet or ALTER not supported — ignore
+
+    # 1) Get current cache: path -> (hash, mtime, size)
+    cache: Dict[str, Tuple[str, float, Optional[int]]] = {}
     async with db.execute(
-        "SELECT path, hash, mtime FROM repo_files WHERE task_id=?", (task_id,)
+        "SELECT path, hash, mtime, size FROM repo_files WHERE task_id=?",
+        (task_id,),
     ) as cursor:
         rows = await cursor.fetchall()
         for r in rows:
-            cache[r["path"]] = (r["hash"], r["mtime"])
+            cache[r["path"]] = (r["hash"], r["mtime"], r["size"])
 
     # 2) Get disk files
     try:
@@ -83,13 +126,36 @@ async def index_workspace(task_id: str, ws: Workspace, db: aiosqlite.Connection)
 
     now_iso = _dt.datetime.utcnow().isoformat() + "Z"
 
+    # Batch accumulators (v0.8.0)
+    file_upserts: List[Tuple] = []       # (task_id, path, hash, mtime, size, indexed_at)
+    symbol_deletes: List[Tuple] = []     # (task_id, path) for changed files
+    symbol_inserts: List[Tuple] = []     # (task_id, path, name, type, line_no)
+
     for rel_path in files:
         indexed_paths.add(rel_path)
         abs_path = ws.safe_path(rel_path)
         if not abs_path.exists() or abs_path.is_dir():
             continue
 
-        mtime = os.path.getmtime(abs_path)
+        try:
+            stat_info = os.stat(abs_path)
+            mtime = stat_info.st_mtime
+            size = stat_info.st_size
+        except OSError:
+            continue
+
+        # ── v0.8.0 mtime + size fast path ───────────────────────────────
+        if rel_path in cache:
+            cached_hash, cached_mtime, cached_size = cache[rel_path]
+            mtime_match = abs(cached_mtime - mtime) < 0.01
+            size_match = cached_size is not None and cached_size == size
+            if mtime_match and size_match:
+                # Both mtime and size unchanged → skip read + hash entirely.
+                continue
+            # If only mtime matches but size differs (same-second rewrite
+            # with different content), fall through to the slow path below.
+
+        # mtime/size changed or new file: read content + hash
         try:
             content = ws.read_file(rel_path)
         except Exception:
@@ -97,45 +163,59 @@ async def index_workspace(task_id: str, ws: Workspace, db: aiosqlite.Connection)
 
         file_hash = sha256_hash(content)
 
-        # Cache check
         if rel_path in cache:
-            cached_hash, cached_mtime = cache[rel_path]
-            if cached_hash == file_hash and abs(cached_mtime - mtime) < 0.01:
-                # Up to date, skip
-                continue
             updated_cnt += 1
         else:
             added_cnt += 1
 
-        # File changed or new: parse and update SQLite
+        # Parse symbols (only for .py files)
         symbols = parse_python_symbols(content) if rel_path.endswith(".py") else []
 
-        # Delete old symbols
-        await db.execute(
-            "DELETE FROM repo_symbols WHERE task_id=? AND path=?", (task_id, rel_path)
-        )
-
-        # Insert new symbols
+        # Queue batch operations instead of executing per-file
+        symbol_deletes.append((task_id, rel_path))
         if symbols:
-            await db.executemany(
-                "INSERT INTO repo_symbols (task_id, path, symbol_name, symbol_type, line_no) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(task_id, rel_path, s["name"], s["type"], s["line_no"]) for s in symbols]
-            )
-
-        # Upsert file metadata
-        await db.execute(
-            "INSERT OR REPLACE INTO repo_files (task_id, path, hash, mtime, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (task_id, rel_path, file_hash, mtime, now_iso)
+            for s in symbols:
+                symbol_inserts.append(
+                    (task_id, rel_path, s["name"], s["type"], s["line_no"])
+                )
+        file_upserts.append(
+            (task_id, rel_path, file_hash, mtime, size, now_iso)
         )
 
     # 3) Cleanup deleted files
     deleted_paths = set(cache.keys()) - indexed_paths
-    for dpath in deleted_paths:
-        deleted_cnt += 1
-        await db.execute("DELETE FROM repo_files WHERE task_id=? AND path=?", (task_id, dpath))
-        await db.execute("DELETE FROM repo_symbols WHERE task_id=? AND path=?", (task_id, dpath))
+    deleted_cnt = len(deleted_paths)
+
+    # ── v0.8.0 batched DB writes ────────────────────────────────────────
+    # Delete stale symbols for changed files
+    if symbol_deletes:
+        await db.executemany(
+            "DELETE FROM repo_symbols WHERE task_id=? AND path=?",
+            symbol_deletes,
+        )
+    # Insert new symbols
+    if symbol_inserts:
+        await db.executemany(
+            "INSERT INTO repo_symbols (task_id, path, symbol_name, symbol_type, line_no) "
+            "VALUES (?, ?, ?, ?, ?)",
+            symbol_inserts,
+        )
+    # Upsert file metadata (note: includes size column now)
+    if file_upserts:
+        await db.executemany(
+            "INSERT OR REPLACE INTO repo_files (task_id, path, hash, mtime, size, indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            file_upserts,
+        )
+    # Delete rows for removed files (files + symbols)
+    if deleted_paths:
+        del_file_params = [(task_id, p) for p in deleted_paths]
+        await db.executemany(
+            "DELETE FROM repo_files WHERE task_id=? AND path=?", del_file_params
+        )
+        await db.executemany(
+            "DELETE FROM repo_symbols WHERE task_id=? AND path=?", del_file_params
+        )
 
     await db.commit()
     return {

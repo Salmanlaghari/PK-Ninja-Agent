@@ -4,20 +4,28 @@ This document tracks the planned evolution of PK Ninja Agent from the current be
 
 ---
 
-## Current State: v0.7.0 Beta
+## Current State: v0.8.0 — Autonomous Execution Engine
 
-PK Ninja Agent v0.7.0 is a feature-complete beta. It includes authentication, persistent settings, a workspace manager, a provider management UI, a dashboard, release-prep hardening (error pages, loading states, health monitoring, startup checks), and full documentation. The test suite stands at 314 passing tests, all backward compatible with v0.6.0.
+PK Ninja Agent v0.8.0 is a feature-complete autonomous coding platform. It adds a priority task scheduler, background worker, persistent workspace sessions, a live execution monitor, crash-recovery, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer. The test suite stands at **524 passing tests**, all backward compatible with v0.7.0.
 
-The remaining work before v1.0.0 is focused on hardening, real-world validation, and a few production-grade features that are intentionally deferred from the beta.
+Every feature is opt-in (`SCHEDULER_ENABLED=false`, `SECURITY_HARDENING_ENABLED=false`, `RECOVERY_AUTO_RESUME=false` by default), so existing deployments behave exactly as v0.7.0 until the new capabilities are explicitly enabled.
+
+The remaining work before v1.0.0 is focused on production hardening, real-world validation, and a few features intentionally deferred from the autonomous engine.
 
 ---
 
 ## v1.0.0 — Stable Release
 
-The goal of v1.0.0 is to ship a stable, production-ready coding agent that small teams can self-host with confidence.
+The goal of v1.0.0 is to ship a stable, production-ready autonomous coding agent that small teams can self-host with confidence.
+
+### Autonomous execution hardening
+- **Worker persistence.** The background worker is in-memory (daemon threads). v1.0.0 should persist the worker queue to SQLite so in-flight tasks survive a process restart and are picked up by the recovery system automatically.
+- **Scheduler persistence.** Similarly, the scheduler queue should be persisted so enqueued-but-not-started tasks survive a restart.
+- **Task dependencies.** Allow tasks to declare dependencies (task B starts only after task A completes) for multi-step autonomous workflows.
+- **Cron / scheduled tasks.** Time-based task triggers (nightly audits, scheduled builds) on top of the existing priority queue.
 
 ### Authentication hardening
-- **OAuth flow.** Replace token-based GitHub login with a proper OAuth app flow (callback, state validation, refresh tokens) for multi-user deployments. The current token-based verification is suitable for single-user/small-team beta but is not ideal for broader use.
+- **OAuth flow.** Replace token-based GitHub login with a proper OAuth app flow (callback, state validation, refresh tokens) for multi-user deployments.
 - **Server-side session revocation.** The current sessions are stateless HMAC tokens; v1.0.0 should add an optional server-side session store (SQLite) to support explicit revocation and session listing.
 - **Rate limiting.** Add per-user rate limiting on auth endpoints to mitigate brute-force attempts.
 - **CSRF protection.** Add CSRF tokens for state-changing endpoints when cookie-based auth is introduced.
@@ -34,17 +42,17 @@ The goal of v1.0.0 is to ship a stable, production-ready coding agent that small
 
 ### AI provider ecosystem
 - **Streaming-first providers.** Ensure all built-in adapters implement true streaming (SSE) end-to-end, including tool-calling providers.
-- **Provider configuration UI.** Allow setting API keys and base URLs per provider from the settings UI (stored encrypted server-side), so users do not need shell access to configure providers.
+- **Provider configuration UI.** Allow setting API keys and base URLs per provider from the settings UI (stored encrypted server-side).
 - **Additional adapters.** Add Anthropic (Claude) and Mistral adapters following the existing adapter pattern.
 
 ### Testing & quality
-- **Integration test suite.** Add end-to-end integration tests that exercise the full agent loop (create task → plan → edit → verify → diff) against a real local workspace with the `local` provider.
-- **Load testing.** Validate concurrent task handling and SSE/WebSocket stability under load.
+- **Integration test suite.** Add end-to-end integration tests that exercise the full autonomous loop (create task → schedule → worker executes → plan → edit → verify → diff → export) against a real local workspace.
+- **Load testing.** Validate concurrent task handling, worker concurrency limits, and SSE/WebSocket stability under load.
 - **Test coverage reporting.** Wire up coverage reporting in CI.
 
 ### Documentation
-- **User guide.** A dedicated user guide covering first-run setup, workspace management, provider configuration, and common workflows.
-- **Admin guide.** Deployment, configuration, and operations documentation for self-hosters.
+- **User guide.** A dedicated user guide covering scheduler configuration, worker tuning, recovery, history search, and export workflows.
+- **Admin guide.** Deployment, configuration, security hardening, and operations documentation for self-hosters.
 - **API reference.** Auto-generated API reference (e.g. via FastAPI's OpenAPI schema export).
 
 ---
