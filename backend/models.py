@@ -302,3 +302,48 @@ class SystemHealthOut(BaseModel):
     environment: str
     components: List[SystemHealthComponent] = Field(default_factory=list)
     startup_checks: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+# ── Autonomous Execution Engine (v0.8.0) ───────────────────────────────────
+
+class TaskQueueItem(BaseModel):
+    """Public representation of a task in the scheduler queue."""
+
+    task_id: str
+    description: str
+    repo_full: str
+    priority: int
+    status: str
+    retries: int
+    max_retries: int
+    enqueued_at: float
+    started_at: Optional[float] = None
+    error: Optional[str] = None
+
+
+class QueueListOut(BaseModel):
+    enabled: bool
+    queue: List[TaskQueueItem] = Field(default_factory=list)
+    queue_length: int = 0
+    running_count: int = 0
+    max_concurrency: int = 1
+
+
+class QueueActionRequest(BaseModel):
+    """Operator action on a queued task (pause/resume/cancel)."""
+
+    task_id: str
+
+
+class RetryRequest(BaseModel):
+    """Manual retry of a task."""
+
+    task_id: str
+    priority: Optional[int] = None
+
+
+class ReorderRequest(BaseModel):
+    """Change a queued task's priority."""
+
+    task_id: str
+    priority: int

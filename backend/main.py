@@ -59,12 +59,18 @@ from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
-                    ProviderInfoOut, ProviderManagerStatusOut, SessionOut,
+                    ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
+                    QueueListOut, ReorderRequest, RetryRequest, SessionOut,
                     SettingsOut, SettingsUpdate, SystemHealthComponent,
-                    SystemHealthOut, TaskCreate, TaskStatus, TaskSummary,
-                    UserOut, WorkspaceActionRequest, WorkspaceCreateRequest,
-                    WorkspaceOut, WorkspaceRenameRequest, normalize_status)
+                    SystemHealthOut, TaskCreate, TaskQueueItem, TaskStatus,
+                    TaskSummary, UserOut, WorkspaceActionRequest,
+                    WorkspaceCreateRequest, WorkspaceOut,
+                    WorkspaceRenameRequest, normalize_status)
 from workspace import Workspace, WorkspaceError
+
+# v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
+from scheduler import (QueueStatus, TaskScheduler, get_scheduler,
+                       init_scheduler, reset_scheduler)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -266,7 +272,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.7.0")
+app = FastAPI(title="PK Ninja Agent", version="0.8.0")
 
 # ── Error handlers (v0.7.0 release prep) ──────────────────────────────────────
 @app.exception_handler(404)
@@ -565,7 +571,7 @@ async def api_system_health() -> dict:
     sh = _system_health(get_settings())
     return SystemHealthOut(
         status=sh.get("status", "unknown"),
-        version=sh.get("version", "0.7.0"),
+        version=sh.get("version", "0.8.0"),
         environment=sh.get("environment", "development"),
         components=[SystemHealthComponent(**c) for c in sh.get("components", [])],
         startup_checks=sh.get("components", []),
@@ -609,6 +615,24 @@ def _persist(event) -> None:
 BUS.set_persist(_persist)
 
 
+# v0.8.0 — Eagerly (re)initialise the scheduler singleton at module load so the
+# app works even if the startup hook hasn't run yet (e.g. under test reload).
+# When SCHEDULER_ENABLED=false (default) the singleton stays None and the
+# original fire-and-forget start_task() path is preserved.
+def _init_scheduler_from_settings() -> None:
+    _s = get_settings()
+    if getattr(_s, "scheduler_enabled", False):
+        init_scheduler(
+            default_priority=getattr(_s, "scheduler_default_priority", 5),
+            default_retries=getattr(_s, "scheduler_default_retries", 1),
+        )
+    else:
+        reset_scheduler()
+
+
+_init_scheduler_from_settings()
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
@@ -633,14 +657,28 @@ async def _startup() -> None:
                 log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
-    log.info("PK Ninja Agent v0.7.0 started (env=%s). DB at %s",
+    log.info("PK Ninja Agent v0.8.0 started (env=%s). DB at %s",
              env, s.db_path)
+    # v0.8.0 — Autonomous Execution Engine: initialise the scheduler singleton
+    # when opted in. When disabled (default), the original fire-and-forget
+    # start_task() path is preserved for full backward compatibility.
+    if getattr(s, "scheduler_enabled", False):
+        init_scheduler(
+            default_priority=getattr(s, "scheduler_default_priority", 5),
+            default_retries=getattr(s, "scheduler_default_retries", 1),
+        )
+        log.info("Autonomous scheduler ENABLED (priority=%s retries=%s concurrency=%s)",
+                 getattr(s, "scheduler_default_priority", 5),
+                 getattr(s, "scheduler_default_retries", 1),
+                 getattr(s, "worker_max_concurrency", 2))
+    else:
+        reset_scheduler()
 
 
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.7.0"}
+    return {"status": "ok", "version": "0.8.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────
@@ -829,6 +867,19 @@ async def api_create_task(body: TaskCreate) -> dict:
     fresh = get_settings()
     repo = body.repository or fresh.github_repo_full()
     await db_create_task(task_id, body.description, repo)
+    # v0.8.0: when the autonomous scheduler is enabled, enqueue the task so the
+    # background worker picks it up by priority. Otherwise (default) keep the
+    # original fire-and-forget behaviour for full backward compatibility.
+    sched = get_scheduler()
+    if sched is not None and getattr(fresh, "scheduler_enabled", False):
+        item = sched.enqueue(
+            task_id=task_id,
+            description=body.description,
+            repo_full=repo,
+            enqueued_at=_dt.datetime.utcnow().timestamp(),
+        )
+        return {"task_id": task_id, "status": item.status.value,
+                "repository": repo, "queued": True}
     start_task(task_id, body.description, repo_full=repo)
     return {"task_id": task_id, "status": TaskStatus.running.value,
             "repository": repo}
@@ -1215,6 +1266,101 @@ async def api_pr_create(body: PRPrepareRequest) -> dict:
         return create_pull_request(rt.workspace, title=body.title, body=body.body)
     except GitHubError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ── Autonomous Execution Engine — Task Scheduler (v0.8.0) ──────────────────
+
+def _scheduler_or_404() -> TaskScheduler:
+    """Return the active scheduler or raise 404 when the feature is disabled."""
+    sched = get_scheduler()
+    if sched is None:
+        raise HTTPException(
+            404,
+            "Task scheduler is disabled. Set SCHEDULER_ENABLED=true to enable "
+            "the autonomous execution engine.",
+        )
+    return sched
+
+
+@app.get("/api/queue")
+async def api_queue_list() -> QueueListOut:
+    fresh = get_settings()
+    sched = get_scheduler()
+    if sched is None:
+        return QueueListOut(
+            enabled=bool(getattr(fresh, "scheduler_enabled", False)),
+            queue=[], queue_length=0, running_count=0,
+            max_concurrency=getattr(fresh, "worker_max_concurrency", 2),
+        )
+    items = sched.list_items()
+    return QueueListOut(
+        enabled=True,
+        queue=[TaskQueueItem(**i.to_dict()) for i in items],
+        queue_length=sched.queue_length(),
+        running_count=sched.running_count(),
+        max_concurrency=getattr(fresh, "worker_max_concurrency", 2),
+    )
+
+
+@app.post("/api/queue/pause")
+async def api_queue_pause(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.pause(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/resume")
+async def api_queue_resume(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.resume(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/cancel")
+async def api_queue_cancel(body: QueueActionRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.cancel(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    # Best-effort: also cancel the live runtime if the task is already running.
+    try:
+        cancel_task(body.task_id)
+    except Exception:  # noqa: BLE001
+        pass
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/retry")
+async def api_queue_retry(body: RetryRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.retry(body.task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    if body.priority is not None:
+        item = sched.reorder(body.task_id, body.priority)
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.post("/api/queue/reorder")
+async def api_queue_reorder(body: ReorderRequest) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.reorder(body.task_id, body.priority)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
+
+
+@app.get("/api/queue/{task_id}")
+async def api_queue_get(task_id: str) -> TaskQueueItem:
+    sched = _scheduler_or_404()
+    item = sched.get(task_id)
+    if item is None:
+        raise HTTPException(404, "Task not found in queue")
+    return TaskQueueItem(**item.to_dict())
 
 
 # ── Frontend ────────────────────────────────────────────────────────────

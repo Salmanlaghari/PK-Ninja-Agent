@@ -121,6 +121,24 @@ class Settings(BaseSettings):
     # the UI/API surface is unchanged.
     multi_agent_enabled: bool = Field(default=False, alias="MULTI_AGENT_ENABLED")
 
+    # ── Autonomous Execution Engine (v0.8.0, opt-in) ─────────────────────
+    # When True, POST /api/tasks enqueues into the TaskScheduler instead of
+    # starting immediately. A background worker drains the queue. Defaults to
+    # False so the existing fire-and-forget start_task() path is unchanged
+    # (backward compatible).
+    scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
+    # Maximum number of tasks the worker may run concurrently (>=1).
+    worker_max_concurrency: int = Field(default=2, alias="WORKER_MAX_CONCURRENCY")
+    # How often (seconds) the worker loop polls the queue when idle.
+    worker_poll_interval_seconds: float = Field(default=1.0, alias="WORKER_POLL_INTERVAL_SECONDS")
+    # Default retry count for tasks that fail (applied by the scheduler retry).
+    scheduler_default_retries: int = Field(default=1, alias="SCHEDULER_DEFAULT_RETRIES")
+    # Default priority for newly enqueued tasks (higher = sooner).
+    scheduler_default_priority: int = Field(default=5, alias="SCHEDULER_DEFAULT_PRIORITY")
+    # On startup, attempt to recover interrupted tasks (mark them, optionally
+    # resume). When false, interrupted tasks are merely detected (safe default).
+    recovery_auto_resume: bool = Field(default=False, alias="RECOVERY_AUTO_RESUME")
+
     @property
     def workspace_root_path(self) -> Path:
         p = Path(self.workspace_root).resolve()
