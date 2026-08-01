@@ -60,12 +60,13 @@ from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
                     ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
-                    QueueListOut, ReorderRequest, RetryRequest, SessionOut,
-                    SettingsOut, SettingsUpdate, SystemHealthComponent,
-                    SystemHealthOut, TaskCreate, TaskQueueItem, TaskStatus,
-                    TaskSummary, UserOut, WorkspaceActionRequest,
-                    WorkspaceCreateRequest, WorkspaceOut,
-                    WorkspaceRenameRequest, normalize_status)
+                    QueueListOut, ReorderRequest, RetryRequest, SessionActionRequest,
+                    SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
+                    SystemHealthComponent, SystemHealthOut, TaskCreate,
+                    TaskQueueItem, TaskStatus, TaskSummary, UserOut,
+                    WorkspaceActionRequest, WorkspaceCreateRequest,
+                    WorkspaceOut, WorkspaceRenameRequest,
+                    WorkspaceSessionListOut, WorkspaceSessionOut, normalize_status)
 from workspace import Workspace, WorkspaceError
 
 # v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
@@ -73,6 +74,9 @@ from scheduler import (QueueStatus, TaskScheduler, get_scheduler,
                        init_scheduler, reset_scheduler)
 from worker import (BackgroundWorker, get_worker, init_worker,
                     reset_worker, stop_worker)
+from sessions import (close_session as _close_session, create_session,
+                      delete_session as _delete_session, find_active_for_repo,
+                      get_session, list_sessions, touch_session)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -94,6 +98,9 @@ async def _db() -> aiosqlite.Connection:
     # Ensure schema exists on every connection (idempotent + defensive so the
     # app works even if the startup hook hasn't run yet, e.g. under reload).
     await conn.executescript(_SCHEMA_SQL)
+    # v0.8.0: ensure the sessions table exists too (idempotent).
+    from sessions import ensure_sessions_schema
+    await ensure_sessions_schema(conn)
     await conn.commit()
     return conn
 
@@ -1394,6 +1401,81 @@ async def api_worker_status() -> dict:
     return {"enabled": True, "running": w.is_running, "active": w.active_count,
             "max_concurrency": getattr(fresh, "worker_max_concurrency", 2),
             "completed": w.completed_count, "failed": w.failed_count}
+
+
+# ── Autonomous Execution Engine — Workspace Sessions (v0.8.0) ──────────────
+
+@app.get("/api/sessions")
+async def api_sessions_list(
+    repo_full: Optional[str] = None,
+    state: Optional[str] = None,
+) -> WorkspaceSessionListOut:
+    fresh = get_settings()
+    items = await list_sessions(
+        Path(fresh.db_path), repo_full=repo_full, state=state,
+    )
+    return WorkspaceSessionListOut(
+        sessions=[WorkspaceSessionOut(**i) for i in items], count=len(items),
+    )
+
+
+@app.post("/api/sessions")
+async def api_sessions_create(body: SessionCreateRequest) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    # If an active session for this repo already exists, reuse it (touch + return)
+    existing = await find_active_for_repo(Path(fresh.db_path), body.repo_full)
+    if existing is not None:
+        updated = await touch_session(
+            Path(fresh.db_path), existing["session_id"],
+            branch=body.branch, task_id=body.task_id,
+            description=body.description,
+        )
+        return WorkspaceSessionOut(**(updated or existing))
+    created = await create_session(
+        Path(fresh.db_path),
+        repo_full=body.repo_full, workspace=body.workspace,
+        branch=body.branch, task_id=body.task_id, description=body.description,
+    )
+    return WorkspaceSessionOut(**created)
+
+
+@app.get("/api/sessions/{session_id}")
+async def api_sessions_get(session_id: str) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    sess = await get_session(Path(fresh.db_path), session_id)
+    if sess is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**sess)
+
+
+@app.post("/api/sessions/{session_id}/restore")
+async def api_sessions_restore(session_id: str) -> WorkspaceSessionOut:
+    """Mark a closed/interrupted session active again (reuse workspace)."""
+    fresh = get_settings()
+    updated = await touch_session(
+        Path(fresh.db_path), session_id, state="active",
+    )
+    if updated is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**updated)
+
+
+@app.post("/api/sessions/{session_id}/close")
+async def api_sessions_close(session_id: str) -> WorkspaceSessionOut:
+    fresh = get_settings()
+    closed = await _close_session(Path(fresh.db_path), session_id)
+    if closed is None:
+        raise HTTPException(404, "Session not found")
+    return WorkspaceSessionOut(**closed)
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_sessions_delete(session_id: str) -> dict:
+    fresh = get_settings()
+    ok = await _delete_session(Path(fresh.db_path), session_id)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    return {"deleted": True, "session_id": session_id}
 
 
 # ── Frontend ────────────────────────────────────────────────────────────

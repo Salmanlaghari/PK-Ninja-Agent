@@ -347,3 +347,38 @@ class ReorderRequest(BaseModel):
 
     task_id: str
     priority: int
+
+
+class WorkspaceSessionOut(BaseModel):
+    """A persistent workspace session."""
+
+    session_id: str
+    repo_full: str
+    branch: Optional[str] = None
+    workspace: str
+    state: str
+    task_id: Optional[str] = None
+    description: Optional[str] = None
+    created_at: str
+    last_active: str
+
+
+class WorkspaceSessionListOut(BaseModel):
+    sessions: List[WorkspaceSessionOut] = Field(default_factory=list)
+    count: int = 0
+
+
+class SessionCreateRequest(BaseModel):
+    """Create or reuse a session for a repo."""
+
+    repo_full: str
+    workspace: str
+    branch: Optional[str] = None
+    task_id: Optional[str] = None
+    description: Optional[str] = None
+
+
+class SessionActionRequest(BaseModel):
+    """Operate on a session by id."""
+
+    session_id: str
