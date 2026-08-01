@@ -181,3 +181,124 @@ class ProviderManagerStatusOut(BaseModel):
 class ProviderActionRequest(BaseModel):
     """Request body for enable/disable/set-active actions."""
     name: str
+
+
+# ── Authentication (v0.7.0) ────────────────────────────────────────────────
+class UserOut(BaseModel):
+    """Non-secret public user identity."""
+    user_id: str
+    username: str
+    display_name: str
+    is_guest: bool = True
+    github_login: Optional[str] = None
+    avatar_url: Optional[str] = None
+    scopes: List[str] = Field(default_factory=list)
+
+
+class LoginResponse(BaseModel):
+    """Successful login response (includes the session token)."""
+    session: str
+    user: UserOut
+    expires_in: int
+
+
+class GuestLoginRequest(BaseModel):
+    display_name: str = Field(default="Guest", max_length=80)
+
+
+class GitHubLoginRequest(BaseModel):
+    """Token-based GitHub login for the beta."""
+    github_token: str = Field(..., min_length=1, max_length=400)
+
+
+class SessionOut(BaseModel):
+    """Current session info (no token — that's only in LoginResponse)."""
+    authenticated: bool
+    auth_enabled: bool
+    user: Optional[UserOut] = None
+
+
+# ── User settings (v0.7.0) ────────────────────────────────────────────────
+class SettingsOut(BaseModel):
+    """Non-secret user preferences exposed to the frontend."""
+    theme: str = "shinobi"
+    ai_provider: str = "local"
+    default_workspace: str = ""
+    terminal_preferences: Dict[str, Any] = Field(default_factory=dict)
+    git_preferences: Dict[str, Any] = Field(default_factory=dict)
+    auto_save: bool = True
+    auto_commit: bool = False
+    notifications: bool = True
+
+
+class SettingsUpdate(BaseModel):
+    """Partial settings update — all fields optional."""
+    theme: Optional[str] = None
+    ai_provider: Optional[str] = None
+    default_workspace: Optional[str] = None
+    terminal_preferences: Optional[Dict[str, Any]] = None
+    git_preferences: Optional[Dict[str, Any]] = None
+    auto_save: Optional[bool] = None
+    auto_commit: Optional[bool] = None
+    notifications: Optional[bool] = None
+
+
+# ── Workspace Manager (v0.7.0) ────────────────────────────────────────────
+class WorkspaceOut(BaseModel):
+    name: str
+    path: str
+    is_default: bool = False
+    is_git_repo: bool = False
+    branch: Optional[str] = None
+    file_count: int = 0
+    size_bytes: int = 0
+    last_modified: Optional[str] = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    repo: Optional[str] = None  # "owner/repo" to clone, else empty workspace
+
+
+class WorkspaceRenameRequest(BaseModel):
+    old_name: str = Field(..., min_length=1, max_length=120)
+    new_name: str = Field(..., min_length=1, max_length=120)
+
+
+class WorkspaceActionRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
+# ── Dashboard (v0.7.0) ────────────────────────────────────────────────────
+class DashboardTaskItem(BaseModel):
+    task_id: str
+    description: str
+    status: str
+    created_at: str
+    branch: Optional[str] = None
+
+
+class SystemHealthComponent(BaseModel):
+    name: str
+    status: str  # ok | degraded | down | unknown
+    detail: str = ""
+
+
+class DashboardOut(BaseModel):
+    recent_tasks: List[DashboardTaskItem] = Field(default_factory=list)
+    active_tasks: List[DashboardTaskItem] = Field(default_factory=list)
+    agent_status: str = "idle"
+    workspace_status: Dict[str, Any] = Field(default_factory=dict)
+    git_status: Dict[str, Any] = Field(default_factory=dict)
+    provider_status: Dict[str, Any] = Field(default_factory=dict)
+    system_health: List[SystemHealthComponent] = Field(default_factory=list)
+    multi_agent_enabled: bool = False
+
+
+# ── System health (v0.7.0) ────────────────────────────────────────────────
+class SystemHealthOut(BaseModel):
+    status: str  # ok | degraded | down
+    version: str
+    environment: str
+    components: List[SystemHealthComponent] = Field(default_factory=list)
+    startup_checks: List[Dict[str, Any]] = Field(default_factory=list)

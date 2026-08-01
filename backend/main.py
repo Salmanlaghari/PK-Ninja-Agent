@@ -34,23 +34,36 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent import (BUS, TaskRuntime, cancel_task, get_runtime,
                    list_runtimes, new_task_id, start_task)
 from ai_provider import provider_status
+from auth import (AuthError, AuthService, InvalidTokenError, User,
+                  get_auth_service, reset_auth_service)
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
-from models import (ConfigOut, DiffOut, EventOut, EventType,
-                    GitBranchRequest, GitCommitRequest, GitPushRequest,
-                    PRPrepareRequest, ProviderActionRequest,
+from settings_store import (get_settings_for_user, update_settings_for_user)
+from release_checks import system_health as _system_health
+from workspace_manager import (WorkspaceManagerError, create_workspace,
+                               delete_workspace, list_workspaces,
+                               recent_workspaces, rename_workspace,
+                               switch_workspace)
+from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
+                    EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
+                    GitCommitRequest, GitPushRequest, GuestLoginRequest,
+                    LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
-                    ProviderInfoOut, ProviderManagerStatusOut,
-                    TaskCreate, TaskStatus, TaskSummary,
-                    normalize_status)
+                    ProviderInfoOut, ProviderManagerStatusOut, SessionOut,
+                    SettingsOut, SettingsUpdate, SystemHealthComponent,
+                    SystemHealthOut, TaskCreate, TaskStatus, TaskSummary,
+                    UserOut, WorkspaceActionRequest, WorkspaceCreateRequest,
+                    WorkspaceOut, WorkspaceRenameRequest, normalize_status)
 from workspace import Workspace, WorkspaceError
 
 logging.basicConfig(level=logging.INFO)
@@ -253,7 +266,310 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.2.0")
+app = FastAPI(title="PK Ninja Agent", version="0.7.0")
+
+# ── Error handlers (v0.7.0 release prep) ──────────────────────────────────────
+@app.exception_handler(404)
+async def _not_found_handler(request: Request, exc):
+    """Return JSON for API routes; serve SPA index for non-API (frontend) routes."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        return JSONResponse(status_code=404, content={"detail": "Not found", "path": path})
+    # SPA fallback: serve index.html so client-side routing works.
+    idx = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+    if idx.exists():
+        return FileResponse(str(idx), status_code=200)
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+
+@app.exception_handler(500)
+async def _server_error_handler(request: Request, exc):
+    """Log internal errors without leaking stack traces to the client."""
+    log.error("internal error on %s: %s", request.url.path, exc)
+    env = getattr(get_settings(), "app_env", "development")
+    detail = "Internal server error" if env == "production" else f"Internal server error: {exc}"
+    return JSONResponse(status_code=500, content={"detail": detail})
+
+# ── Auth dependency (v0.7.0) ────────────────────────────────────────────────
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> User:
+    """Resolve the current user from the request.
+
+    When ``AUTH_ENABLED=false`` (default) this always returns the anonymous
+    placeholder, so every endpoint remains open (backward compatible). When
+    enabled, a valid session token is required.
+    """
+    svc = get_auth_service(get_settings())
+    authz = credentials.credentials if credentials else None
+    query_session = request.query_params.get("session")
+    try:
+        return svc.require_user_from_request(authz, query_session)
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+def _user_to_out(user: User) -> UserOut:
+    return UserOut(**user.to_dict())
+
+
+# ── Authentication routes (v0.7.0) ──────────────────────────────────────────
+@app.get("/api/auth/status")
+async def auth_status(request: Request) -> dict:
+    """Publicly report whether auth is enabled and the current identity.
+
+    This endpoint does **not** require a session — it must be reachable
+    before login so the frontend can decide whether to show the login
+    screen. When auth is enabled and a valid token is present, the user
+    identity is included; otherwise ``user`` is null.
+    """
+    svc = get_auth_service(get_settings())
+    user: Optional[User] = None
+    if svc.enabled:
+        # Best-effort: resolve the user from the header/query, but never 401.
+        authz = request.headers.get("authorization")
+        query_session = request.query_params.get("session")
+        try:
+            user = svc.require_user_from_request(authz, query_session)
+        except InvalidTokenError:
+            user = None
+    return SessionOut(
+        authenticated=svc.enabled and user is not None and user.user_id != "anonymous",
+        auth_enabled=svc.enabled,
+        user=_user_to_out(user) if (user and user.user_id != "anonymous") else None,
+    ).model_dump()
+
+
+@app.post("/api/auth/guest")
+async def auth_guest(body: GuestLoginRequest) -> dict:
+    """Create a guest session (allowed when AUTH_GUEST_ALLOWED=true)."""
+    svc = get_auth_service(get_settings())
+    if not svc.enabled:
+        # Auth disabled — return a no-op success with the anonymous user so
+        # the frontend can treat it uniformly.
+        return LoginResponse(
+            session="",
+            user=_user_to_out(User("anonymous", "anonymous", "Anonymous")),
+            expires_in=0,
+        ).model_dump()
+    try:
+        user = svc.login_guest(body.display_name)
+    except AuthError as exc:
+        raise HTTPException(403, str(exc))
+    token = svc.create_session(user)
+    ttl = svc._guest_ttl
+    return LoginResponse(session=token, user=_user_to_out(user),
+                         expires_in=ttl).model_dump()
+
+
+@app.post("/api/auth/github")
+async def auth_github(body: GitHubLoginRequest) -> dict:
+    """Sign in with a GitHub token (token verified against /user, not stored)."""
+    svc = get_auth_service(get_settings())
+    if not svc.enabled:
+        raise HTTPException(400, "Authentication is disabled.")
+    try:
+        user = svc.login_github(body.github_token)
+    except AuthError as exc:
+        raise HTTPException(401, str(exc))
+    token = svc.create_session(user)
+    return LoginResponse(session=token, user=_user_to_out(user),
+                         expires_in=svc._user_ttl).model_dump()
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(user: User = Depends(current_user)) -> dict:
+    """Stateless logout — the client discards the token."""
+    svc = get_auth_service(get_settings())
+    # The token isn't passed here (it's in the header); logout is stateless.
+    svc.logout("")
+    return {"success": True}
+
+
+@app.get("/api/me")
+async def api_me(user: User = Depends(current_user)) -> dict:
+    """Return the current user's identity (protected endpoint example)."""
+    return _user_to_out(user).model_dump()
+
+
+# ── User settings (v0.7.0) ──────────────────────────────────────────
+@app.get("/api/settings")
+async def get_user_settings(user: User = Depends(current_user)) -> dict:
+    """Return the current user's non-secret preferences.
+
+    Falls back to server config defaults when no persisted preferences
+    exist (so the first call works without any setup).
+    """
+    data = await get_settings_for_user(get_settings(), user)
+    return SettingsOut(**data).model_dump()
+
+
+@app.put("/api/settings")
+async def update_user_settings(body: SettingsUpdate,
+                               user: User = Depends(current_user)) -> dict:
+    """Update the current user's preferences (partial update)."""
+    updates = body.model_dump(exclude_none=True)
+    data = await update_settings_for_user(get_settings(), user, updates)
+    return SettingsOut(**data).model_dump()
+
+
+# ── Workspace Manager routes (v0.7.0) ────────────────────────────────────────
+@app.get("/api/workspaces")
+async def api_list_workspaces(user: User = Depends(current_user)) -> dict:
+    """List all workspaces under the configured root."""
+    items = await list_workspaces(get_settings())
+    return {"workspaces": [WorkspaceOut(**w).model_dump() for w in items]}
+
+
+@app.get("/api/workspaces/recent")
+async def api_recent_workspaces(user: User = Depends(current_user)) -> dict:
+    """Return recently-accessed workspaces."""
+    items = await recent_workspaces(get_settings(), limit=10)
+    return {"workspaces": [WorkspaceOut(**w).model_dump() for w in items]}
+
+
+@app.post("/api/workspaces")
+async def api_create_workspace(body: WorkspaceCreateRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Create a new workspace (optionally cloning a GitHub repo)."""
+    try:
+        item = await create_workspace(get_settings(), body.name,
+                                      repo=body.repo)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.put("/api/workspaces")
+async def api_rename_workspace(body: WorkspaceRenameRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Rename an existing workspace."""
+    try:
+        item = await rename_workspace(get_settings(), body.old_name,
+                                      body.new_name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.delete("/api/workspaces/{name}")
+async def api_delete_workspace(name: str,
+                               user: User = Depends(current_user)) -> dict:
+    """Delete a workspace directory (recursive)."""
+    try:
+        item = await delete_workspace(get_settings(), name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+@app.post("/api/workspaces/switch")
+async def api_switch_workspace(body: WorkspaceActionRequest,
+                               user: User = Depends(current_user)) -> dict:
+    """Mark a workspace as active (records recent access)."""
+    try:
+        item = await switch_workspace(get_settings(), body.name)
+    except WorkspaceManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceOut(**item).model_dump()
+
+
+# ── Dashboard (v0.7.0) ────────────────────────────────────────────────────────
+def _task_row_to_item(row: dict) -> DashboardTaskItem:
+    return DashboardTaskItem(
+        task_id=str(row.get("task_id", "")),
+        description=str(row.get("description", "")),
+        status=normalize_status(row.get("status", "idle")),
+        created_at=str(row.get("created_at", "")),
+        branch=row.get("branch"),
+    )
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(user: User = Depends(current_user)) -> dict:
+    """Aggregated dashboard: tasks, agent, workspace, git, provider, health."""
+    settings = get_settings()
+    # Tasks
+    rows = await db_list_tasks()
+    for r in rows:
+        _runtime_status(r.get("task_id", ""), r)
+    recent = [_task_row_to_item(r) for r in rows[:10]]
+    active = [_task_row_to_item(r) for r in rows
+              if r.get("status") in ("running", "planning", "queued")]
+    # Agent status
+    runtimes = list_runtimes()
+    agent_status = "idle"
+    if any(rt.status.value in ("running", "planning") for rt in runtimes):
+        agent_status = "busy"
+    # Workspace status
+    ws_status: dict = {"count": 0, "default": None}
+    try:
+        items = await list_workspaces(settings)
+        ws_status = {
+            "count": len(items),
+            "default": next((w["name"] for w in items if w["is_default"]), None),
+            "names": [w["name"] for w in items],
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # Git status
+    git_status: dict = {"configured": False}
+    try:
+        info = repo_info(settings)
+        git_status = {
+            "configured": True,
+            "full_name": info.full_name,
+            "default_branch": info.default_branch,
+            "private": info.private,
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # Provider status
+    provider_status: dict = {"configured": False}
+    try:
+        ps = provider_status(settings)
+        provider_status = {
+            "configured": bool(ps.get("configured")),
+            "provider": ps.get("provider"),
+            "model": ps.get("model"),
+            "streaming_supported": ps.get("streaming_supported"),
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # System health
+    try:
+        sh = _system_health(settings)
+        sys_components = [SystemHealthComponent(**c) for c in sh.get("components", [])]
+    except Exception:  # noqa: BLE001
+        sys_components = []
+    out = DashboardOut(
+        recent_tasks=recent,
+        active_tasks=active,
+        agent_status=agent_status,
+        workspace_status=ws_status,
+        git_status=git_status,
+        provider_status=provider_status,
+        system_health=sys_components,
+        multi_agent_enabled=bool(getattr(settings, "multi_agent_enabled", False)),
+    )
+    return out.model_dump()
+
+
+@app.get("/api/system/health")
+async def api_system_health() -> dict:
+    """Public system-health snapshot (no auth, no secrets)."""
+    sh = _system_health(get_settings())
+    return SystemHealthOut(
+        status=sh.get("status", "unknown"),
+        version=sh.get("version", "0.7.0"),
+        environment=sh.get("environment", "development"),
+        components=[SystemHealthComponent(**c) for c in sh.get("components", [])],
+        startup_checks=sh.get("components", []),
+    ).model_dump()
 
 
 # Wire event persistence into the bus + keep DB task status in sync.
@@ -296,13 +612,35 @@ BUS.set_persist(_persist)
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
-    log.info("PK Ninja Agent v0.2 started. DB at %s", settings.db_path)
+    s = get_settings()
+    env = getattr(s, "app_env", "development")
+    # Production-safety warnings (non-blocking).
+    if env == "production":
+        if getattr(s, "debug", False):
+            log.warning("PRODUCTION SAFETY: DEBUG=true is not recommended in production.")
+        if not getattr(s, "auth_enabled", False):
+            log.warning("PRODUCTION SAFETY: AUTH_ENABLED=false in production — dashboard is unprotected.")
+        if not getattr(s, "auth_secret", ""):
+            log.warning("PRODUCTION SAFETY: AUTH_SECRET is empty — sessions cannot be signed securely.")
+    # Run release-prep startup checks (v0.7.0).
+    try:
+        from release_checks import run_startup_checks
+        checks = run_startup_checks(s)
+        for chk in checks:
+            if chk.get("status") == "warn":
+                log.warning("startup check: %s — %s", chk.get("name"), chk.get("detail"))
+            else:
+                log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
+    except Exception as exc:  # noqa: BLE001 — never block startup on checks
+        log.warning("startup checks skipped: %s", exc)
+    log.info("PK Ninja Agent v0.7.0 started (env=%s). DB at %s",
+             env, s.db_path)
 
 
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.7.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

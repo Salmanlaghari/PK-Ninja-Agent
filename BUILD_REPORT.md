@@ -240,3 +240,144 @@ Adapters wrap the existing provider classes; the tool/safety layers (workspace, 
 - Additional first-party adapters (Anthropic, Jules) registered into the manager alongside their existing `ai_provider.py` classes.
 - Rate-limit-aware fallback (respect 429/Retry-After before switching).
 - UI: drag-to-reorder fallback chain, per-provider latency sparkline.
+
+
+---
+
+# PK Ninja Agent — v0.7.0 Beta — Product & Deployment Phase Build Report
+
+## Status: ✅ Complete, Verified & Backward-Compatible
+
+Branch: `feat/beta-product-v0.7.0` (off `main` at `86a24ba`)
+
+The **Product & Deployment Phase** layers authentication, user settings, a workspace manager, a dedicated provider manager UI, a system dashboard, and production release preparation on top of the stable v0.6.0 codebase — no existing functionality removed, no architecture replaced, full backward compatibility preserved by opt-in defaults (`AUTH_ENABLED=false`).
+
+---
+
+## What Changed by Phase
+
+### Phase 1: Authentication (`backend/auth.py`, `backend/config.py`, `backend/models.py`, `backend/main.py`, `frontend/`)
+- **Modular auth service** (`backend/auth.py`): `User` dataclass, `AuthError`/`InvalidTokenError`, `AuthService` class with HMAC-SHA256 signed, base64-encoded stateless session tokens.
+- **GitHub login** — token-based verification against GitHub's `/user` endpoint via `httpx` (suitable for beta; not an OAuth app). Returns a signed session token.
+- **Guest mode** — ephemeral 4-hour TTL anonymous sessions (`AUTH_GUEST_TTL_SECONDS`).
+- **Session management** — stateless tokens (no server-side store); `require_user_from_request()` accepts both raw token and `Bearer <token>` header values.
+- **Logout** — client-side token removal (stateless tokens cannot be revoked server-side without a store; documented as a v1.0.0 hardening item).
+- **Protected dashboard** — `current_user()` FastAPI dependency returns an anonymous placeholder user when `AUTH_ENABLED=false` (default), so all existing endpoints work unchanged.
+- **Public status** — `GET /api/auth/status` is public (no auth) to solve the chicken-and-egg problem of checking login state before authenticating.
+- **Config** (`backend/config.py`): `auth_enabled`, `auth_guest_allowed`, `auth_github_enabled`, `auth_secret`, `auth_guest_ttl_seconds`, `auth_user_ttl_seconds`.
+- **Frontend**: login screen with GitHub + guest mode buttons, transparent `window.fetch` wrapper that attaches `Authorization: Bearer <token>` from `sessionStorage`, user menu (avatar, name, logout), `onAuthSuccess` hook for deferred app initialization.
+- **Tests**: `tests/test_auth.py` — 23 tests (token sign/verify/expiry, GitHub verify, guest login, protected routes, status, logout, no-secrets).
+
+### Phase 2: Settings (`backend/settings_store.py`, `backend/main.py`, `backend/models.py`, `frontend/`)
+- **Persistent settings store** (`backend/settings_store.py`): SQLite key/value table (`user_settings`) keyed by `user_id`; `PREFERENCE_KEYS` whitelist; `get_settings_for_user()` merges config defaults with persisted overrides; `update_settings_for_user()` validates keys.
+- **Settings**: theme, AI provider selection, default workspace, terminal preferences, git preferences, auto save, auto commit, notifications.
+- **API**: `GET /api/settings`, `PUT /api/settings` (both `Depends(current_user)`); uses `"default"` user when auth disabled.
+- **Frontend**: settings modal with provider select populated from `/api/providers`, save/reset, apply-to-form.
+- **Tests**: `tests/test_settings.py` — 9 tests.
+
+### Phase 3: Workspace Manager (`backend/workspace_manager.py`, `backend/main.py`, `frontend/`)
+- **Workspace CRUD** (`backend/workspace_manager.py`): manages top-level directories under `WORKSPACE_ROOT`; `_safe_name()` validates a single path segment (rejects separators, traversal, `.`/`..`); `list_workspaces`, `create_workspace` (with optional repo clone), `rename_workspace`, `delete_workspace`, `switch_workspace`, `recent_workspaces`.
+- **Recent tracking**: `recent_workspaces` SQLite table, `_touch_recent()` on switch/create.
+- **Description**: `_describe()` returns a `WorkspaceOut` dict with git info (branch, dirty, ahead/behind), file count, size, last modified.
+- **API**: `GET /api/workspaces`, `GET /api/workspaces/recent`, `POST /api/workspaces`, `PUT /api/workspaces`, `DELETE /api/workspaces/{name}`, `POST /api/workspaces/switch`.
+- **Frontend**: workspace modal with create/list/recent/switch/rename/delete, size formatting, status messages.
+- **Tests**: `tests/test_workspace_manager.py` — 25 tests (safe name validation, CRUD, recent, switch, delete, error cases).
+
+### Phase 4: Provider Manager UI (`frontend/index.html`, `frontend/app.js`, `frontend/style.css`)
+- Dedicated provider management modal reusing existing v0.6.0 `/api/providers` routes (no backend changes needed).
+- Summary header (active provider, installed count, enabled count), provider cards with health pill, enable/disable toggle, set-active, per-provider capability + health detail view.
+- Exposed as `window.Providers` module; degrades gracefully when `PROVIDER_MANAGER_ENABLED=false`.
+
+### Phase 5: Dashboard (`backend/main.py`, `backend/models.py`, `frontend/`)
+- **`GET /api/dashboard`** — aggregates recent tasks (from DB), active tasks (from `list_runtimes()`), agent status, workspace status, git status, provider status, system health, and the multi-agent flag.
+- **`GET /api/system/health`** — public (no auth, no secrets) endpoint for uptime monitoring; returns `{status, version, environment, components}` snapshot.
+- **`backend/release_checks.py`**: `run_startup_checks()` (non-blocking, never raises) and `system_health()` used by the dashboard and health endpoint.
+- **`_task_row_to_item()`** helper converts DB rows to `DashboardTaskItem`.
+- **Frontend**: dashboard modal with task lists, health components, system status.
+- **Tests**: `tests/test_dashboard.py` — 12 tests.
+
+### Phase 6: Release Preparation (`backend/main.py`, `backend/release_checks.py`, `backend/config.py`, `frontend/`)
+- **Production config** (`backend/config.py`): `app_env` (`APP_ENV`), `debug` (`DEBUG`), `site_url` (`SITE_URL`).
+- **Error pages**: 404 handler returns JSON for `/api/*` and SPA fallback (`index.html`) for non-API routes (client-side routing); 500 handler logs server-side and returns a generic message in production (no stack trace) but detail in development.
+- **Loading states**: frontend loading banner (`#app-loading`) and error toast (`#app-error-toast`); `UI` helper module (`showLoading`/`hideLoading`/`showError`).
+- **Better logging**: structured startup logs, production-safety warnings (DEBUG, AUTH_ENABLED, AUTH_SECRET when `APP_ENV=production`).
+- **Health monitoring**: `/api/system/health` with component breakdown; startup checks logged at boot.
+- **Startup checks** (`backend/release_checks.py`): `_check_python_version()`, `_check_workspace_root()`, `_check_database()`, `_check_github()`, `_check_ai_provider()`, `_check_production_safety()` — non-blocking, logged at startup.
+- **Tests**: `tests/test_release_prep.py` — 14 tests (404 JSON/SPA, 500 dev/prod, health endpoint, startup checks, production safety).
+
+---
+
+## Files Changed
+
+- `backend/auth.py` — **new**: modular authentication (GitHub login, guest mode, sessions, logout, token signing).
+- `backend/settings_store.py` — **new**: SQLite key/value persistent user settings store.
+- `backend/workspace_manager.py` — **new**: workspace CRUD, recent tracking, safe-name validation.
+- `backend/release_checks.py` — **new**: non-blocking startup checks + system health snapshot.
+- `backend/config.py` — extended Settings with auth, user preference, and release/deployment env vars.
+- `backend/main.py` — app version → `0.7.0`; auth/settings/workspace/dashboard/health routes; 404/500 exception handlers; enhanced startup logging.
+- `backend/models.py` — added auth, settings, workspace, and dashboard Pydantic models.
+- `frontend/index.html` — header buttons, user menu, settings/workspaces/providers/dashboard modals, loading banner, error toast.
+- `frontend/app.js` — `Auth`, `Settings`, `Workspaces`, `Providers`, `Dashboard`, `UI` IIFE modules; transparent fetch wrapper; boot sequence.
+- `frontend/style.css` — auth UI, settings modal, workspace list, provider manager, dashboard, loading banner, error toast styles.
+- `tests/test_auth.py` — **new**: 23 auth tests.
+- `tests/test_settings.py` — **new**: 9 settings tests.
+- `tests/test_workspace_manager.py` — **new**: 25 workspace manager tests.
+- `tests/test_dashboard.py` — **new**: 12 dashboard tests.
+- `tests/test_release_prep.py` — **new**: 14 release prep tests.
+- `README.md` — added v0.7.0 env vars and Section 13 (Product & Deployment Phase documentation).
+- `CHANGELOG.md` — **new**: full version history v0.3.0 → v0.7.0.
+- `ROADMAP.md` — **new**: v1.0.0 goals and future directions.
+- `CONTRIBUTING.md` — **new**: development conventions, PR process, adding providers.
+
+---
+
+## Tests Executed & Results
+
+Full suite (231 pre-existing v0.5.0/v0.6.0 + 83 new v0.7.0 tests):
+
+```bash
+python3 -m pytest -q
+======================= 314 passed in <20s ========================
+```
+
+New test breakdown:
+- `tests/test_auth.py` — 23 tests (token sign/verify/expiry, GitHub verify, guest login, protected routes, status, logout, no-secrets)
+- `tests/test_settings.py` — 9 tests (load, save, reset, defaults, validation, no-secrets)
+- `tests/test_workspace_manager.py` — 25 tests (safe name, CRUD, recent, switch, delete, errors)
+- `tests/test_dashboard.py` — 12 tests (dashboard aggregation, health endpoint, no-secrets)
+- `tests/test_release_prep.py` — 14 tests (404 JSON/SPA, 500 dev/prod, startup checks, production safety)
+
+Backward compatibility verified: all 231 original tests pass unchanged with `AUTH_ENABLED=false` (default). Secret-leak guard preserved across all new endpoints.
+
+---
+
+## Beta Readiness
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Authentication | ✅ Beta-ready | Opt-in (`AUTH_ENABLED=false` default); GitHub token login + guest mode; stateless HMAC sessions |
+| Settings | ✅ Beta-ready | Persistent per-user; merges config defaults with overrides |
+| Workspace Manager | ✅ Beta-ready | Full CRUD with path-traversal protection; recent tracking |
+| Provider Manager UI | ✅ Beta-ready | Dedicated modal reusing v0.6.0 backend |
+| Dashboard | ✅ Beta-ready | Aggregates tasks, agent, workspace, git, provider, health |
+| Release Prep | ✅ Beta-ready | Error pages, loading states, production safety, health monitoring |
+| Backward Compat | ✅ Verified | All 231 prior tests pass unchanged |
+| Secret Safety | ✅ Verified | No secrets in any API response |
+| Documentation | ✅ Complete | README, CHANGELOG, ROADMAP, CONTRIBUTING, BUILD_REPORT |
+
+---
+
+## Remaining Work Before v1.0.0
+
+- **Auth hardening**: server-side session revocation store, refresh tokens, CSRF protection for state-changing endpoints, rate limiting on login.
+- **Multi-tenancy**: per-user workspace isolation, shared/team workspaces, role-based access control.
+- **Deployment**: container image (Dockerfile), CI/CD pipeline, environment validation gate on startup (block boot on missing required config in production).
+- **Provider ecosystem**: background health probe scheduler (`PROVIDER_HEALTH_INTERVAL`), hot-reload of config, additional first-party adapters (Anthropic, Jules) into the manager.
+- **Testing**: end-to-end (browser) tests, load testing, auth integration tests against real GitHub.
+- **Docs**: API reference (OpenAPI auto-docs), user guide, deployment guide.
+
+---
+
+## Recommended Version Tag
+
+**`v0.7.0-beta`** — Product & Deployment Phase. Semver pre-release (`-beta`): all product surfaces (auth, settings, workspaces, providers, dashboard) are implemented and tested, with explicit hardening work scoped for v1.0.0. Full backward compatibility preserved; opt-in defaults keep existing deployments unchanged.

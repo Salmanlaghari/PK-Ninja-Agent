@@ -129,6 +129,19 @@ PROVIDER_ENABLED=local,openai,gemini   # comma-separated enabled provider list
 PROVIDER_FALLBACK_ORDER=          # explicit fallback chain (overrides auto-built)
 PROVIDER_HEALTH_INTERVAL=300      # seconds between background health probes
 
+# v0.7.0 Beta — Authentication, Settings, Workspace Manager (all optional, opt-in)
+AUTH_ENABLED=false                # set "true" to require login (GitHub token or guest)
+AUTH_GUEST_ALLOWED=true           # allow ephemeral guest sessions (4h TTL)
+AUTH_GITHUB_ENABLED=false         # expose GitHub-token login on the login screen
+AUTH_SECRET=                      # HMAC signing secret for sessions (required if AUTH_ENABLED=true in prod)
+AUTH_GUEST_TTL_SECONDS=14400      # guest session lifetime (default 4 hours)
+AUTH_USER_TTL_SECONDS=604800      # authenticated session lifetime (default 7 days)
+MULTI_AGENT_ENABLED=false         # enable multi-agent coordinator (v0.5.0)
+
+APP_ENV=development               # development | production (affects error detail + safety warnings)
+DEBUG=false                       # verbose logging (not recommended in production)
+SITE_URL=                         # public site URL (for deployment references)
+
 COMMAND_TIMEOUT_SECONDS=30
 ```
 
@@ -355,3 +368,102 @@ With `PROVIDER_MANAGER_ENABLED=false` (default):
 With `PROVIDER_MANAGER_ENABLED=true`:
 - `Agent._select_provider()` uses the manager's active provider, unwrapping the adapter's `_inner` so `isinstance(provider, LocalProvider)` checks still hold.
 - Fallback and health tracking are active; the rest of the agent loop is unchanged.
+
+---
+
+## 13. v0.7.0 Beta — Product & Deployment Phase
+
+The v0.7.0 release transforms PK Ninja Agent from a development prototype into a real **beta product**. It adds authentication, persistent user settings, a workspace manager, an enhanced provider management UI, a dashboard, release-prep hardening (error pages, loading states, health monitoring, startup checks), and updated documentation. Every feature is **opt-in and backward compatible**: with all new flags at their defaults, the app behaves exactly as v0.6.0.
+
+### Design principles
+
+- **Do not rebuild.** All new modules are layered on top of the stable codebase. No existing file was replaced or had functionality removed.
+- **Backward compatible by default.** `AUTH_ENABLED=false`, `PROVIDER_MANAGER_ENABLED=false`, and `MULTI_AGENT_ENABLED=false` preserve v0.6.0 behavior. Existing tests pass unchanged.
+- **Modular.** Authentication, settings, workspace management, and release checks are each isolated in their own module with a narrow public interface.
+- **No secrets in responses.** The secret-leak guard (tests checking for `api_key`, `token`, `password`, `secret` substrings) covers every new endpoint.
+
+### Authentication (Phase 1)
+
+A modular, opt-in authentication system in `backend/auth.py`.
+
+- **GitHub login** — verifies a personal-access token against GitHub's `/user` endpoint (token-based, not OAuth app; suitable for single-user/small-team beta). The token is verified and discarded; it is never stored server-side.
+- **Guest mode** — ephemeral sessions with a configurable TTL (default 4 hours) when `AUTH_GUEST_ALLOWED=true`.
+- **Sessions** — stateless HMAC-SHA256 signed tokens (base64 JSON payload). No server-side session store; the signature is verified on every request.
+- **Logout** — client-side token removal (stateless tokens need no server invalidation).
+- **`/api/auth/status`** — a public endpoint (no auth required) so the frontend can detect whether auth is enabled *before* login, solving the chicken-and-egg problem.
+- **`current_user` dependency** — returns an anonymous placeholder user when auth is disabled, so every existing endpoint works unchanged.
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/auth/status` | GET | public | Detect whether auth is enabled + current session |
+| `/api/auth/guest` | POST | public | Create a guest session |
+| `/api/auth/github` | POST | public | Verify a GitHub token and create a session |
+| `/api/auth/logout` | POST | required | Logout (client discards token) |
+| `/api/me` | GET | required | Current user info |
+
+Frontend: a login overlay (GitHub token field + guest button) and a user menu (avatar, name, sign-out). A transparent `window.fetch` wrapper attaches `Authorization: Bearer <token>` to every request from `sessionStorage`, so existing JS fetch calls need no changes.
+
+### Settings (Phase 2)
+
+A persistent, per-user settings store in `backend/settings_store.py` (SQLite `user_settings` table keyed by user id). When auth is disabled, all preferences are stored under the `"default"` user.
+
+Preferences: theme, AI provider, default workspace, terminal preferences (shell, font size, scrollback), git preferences (auto-fetch, sign commits, branch prefix), auto-save, auto-commit, notifications.
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/settings` | GET | required | Current merged preferences (defaults + overrides) |
+| `/api/settings` | PUT | required | Partial update of preferences |
+
+Frontend: a settings modal with a form for every preference and Save / Reset-to-defaults buttons.
+
+### Workspace Manager (Phase 3)
+
+A sandboxed workspace manager in `backend/workspace_manager.py` that operates on top-level directories under `WORKSPACE_ROOT`. All names are validated as single path segments (rejects path separators and traversal). Recently-used workspaces are tracked in a `recent_workspaces` SQLite table.
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/workspaces` | GET | required | List all workspaces (name, path, git, file count, size, default) |
+| `/api/workspaces/recent` | GET | required | Recently-accessed workspaces |
+| `/api/workspaces` | POST | required | Create a workspace (optionally `git clone --depth 1 owner/repo`) |
+| `/api/workspaces` | PUT | required | Rename a workspace |
+| `/api/workspaces/{name}` | DELETE | required | Delete a workspace (recursive) |
+| `/api/workspaces/switch` | POST | required | Mark a workspace active (records recent access) |
+
+Frontend: a Workspaces modal with create form, workspace list (with default/git tags), recent list, and switch/rename/delete actions.
+
+### Provider Manager UI (Phase 4)
+
+A dedicated provider management modal that reuses the existing v0.6.0 `/api/providers` endpoints (no backend changes). It shows a summary (active provider, health, manager status), installed-provider cards (display name, health pill, tags for requires-key/disabled/streaming/tools), and a detail view with capabilities, enable/disable, set-active, and health-check actions. The original sidebar provider panel is retained.
+
+### Dashboard (Phase 5)
+
+An aggregated dashboard endpoint and UI.
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/dashboard` | GET | required | Recent + active tasks, agent status, workspace/git/provider status, system health, multi-agent flag |
+| `/api/system/health` | GET | public | Aggregated system-health snapshot (status, version, environment, components) — no secrets |
+
+Frontend: a Dashboard modal with a summary row, active/recent task lists, workspace/git/provider status cards, and system-health components.
+
+### Release Preparation (Phase 6)
+
+- **Error handlers** — 404 returns JSON for `/api/*` routes and serves `index.html` (SPA fallback) for non-API routes so client-side routing works. 500 logs the error server-side and returns a generic message in production (no stack-trace leak) with a detailed message in development.
+- **Loading states** — a loading banner and a global error toast in the frontend, driven by a small `UI` helper module.
+- **Startup checks** — `backend/release_checks.py` runs non-blocking checks at startup (Python version, workspace root, database, GitHub, AI provider, production safety) and logs warnings. Results are exposed via `/api/system/health`.
+- **Production safety** — when `APP_ENV=production`, the startup logs warnings if `DEBUG=true`, `AUTH_ENABLED=false`, or `AUTH_SECRET` is empty.
+- **Health monitoring** — `/api/system/health` returns an aggregated status (`ok`/`degraded`/`down`) with per-component detail, suitable for uptime checks.
+
+### Test coverage
+
+The full suite grew from 231 tests (v0.6.0) to **314 tests** across these new files:
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/test_auth.py` | 23 | Auth disabled, guest flow, token internals, GitHub login, no-secret-leak |
+| `tests/test_settings.py` | 9 | Settings routes, store unit tests, no-secret-leak |
+| `tests/test_workspace_manager.py` | 25 | Workspace CRUD routes, validation, recents, no-secret-leak, auth compat |
+| `tests/test_dashboard.py` | 12 | Dashboard shape, task items, statuses, system health, no-secret-leak, auth compat |
+| `tests/test_release_prep.py` | 14 | Error handlers, health endpoints, release-checks module, frontend UI, no-secret-leak |
+
+All 231 pre-existing tests continue to pass unchanged.
