@@ -463,3 +463,44 @@ class ExportHistoryRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     limit: int = Field(default=100, ge=1, le=500)
+
+
+# ── v0.8.0 Phase 9: Security Hardening models ─────────────────────────────
+
+
+class WorkspaceValidationOut(BaseModel):
+    """Result of validating a workspace directory for safety."""
+
+    valid: bool
+    root: str
+    issues: List[str] = Field(default_factory=list)
+    checked_files: int = 0
+    checked_dirs: int = 0
+    symlinks: int = 0
+
+
+class CommandCheckRequest(BaseModel):
+    """Validate a command against the security pipeline (dry-run, no exec)."""
+
+    command: str
+
+
+class CommandCheckOut(BaseModel):
+    """Result of the command security check."""
+
+    allowed: bool
+    reason: str
+    issues: List[str] = Field(default_factory=list)
+
+
+class SensitivePathRequest(BaseModel):
+    """Check whether a path looks sensitive (contains secrets/keys)."""
+
+    path: str
+
+
+class SensitivePathOut(BaseModel):
+    """Result of the sensitive-path check."""
+
+    sensitive: bool
+    path: str

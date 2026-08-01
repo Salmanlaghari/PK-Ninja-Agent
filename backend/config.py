@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # On startup, attempt to recover interrupted tasks (mark them, optionally
     # resume). When false, interrupted tasks are merely detected (safe default).
     recovery_auto_resume: bool = Field(default=False, alias="RECOVERY_AUTO_RESUME")
+    # When True, the v0.8.0 enhanced security pipeline (extra blocklist,
+    # destructive-argument containment, workspace validation) is applied to
+    # every command and workspace. Defaults to False for backward compat —
+    # the existing terminal.validate_command remains the baseline guard.
+    security_hardening_enabled: bool = Field(default=False, alias="SECURITY_HARDENING_ENABLED")
+    # Maximum number of files validate_workspace will scan before aborting
+    # (defence against pathological / zip-bomb workspaces).
+    security_max_workspace_files: int = Field(default=200_000, alias="SECURITY_MAX_WORKSPACE_FILES")
 
     @property
     def workspace_root_path(self) -> Path:

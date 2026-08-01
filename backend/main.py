@@ -70,7 +70,10 @@ from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     TaskQueueItem, TaskStatus, TaskSummary, UserOut,
                     WorkspaceActionRequest, WorkspaceCreateRequest,
                     WorkspaceOut, WorkspaceRenameRequest,
-                    WorkspaceSessionListOut, WorkspaceSessionOut, normalize_status)
+                    WorkspaceSessionListOut, WorkspaceSessionOut,
+                    CommandCheckOut, CommandCheckRequest,
+                    SensitivePathOut, SensitivePathRequest,
+                    WorkspaceValidationOut, normalize_status)
 from workspace import Workspace, WorkspaceError
 
 # v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
@@ -88,6 +91,9 @@ from history import (get_job_detail, history_stats, query_history)
 from exporter import (export_history_csv, export_history_json,
                       export_logs_json, export_logs_text,
                       export_report_markdown)
+from security import (WorkspaceValidationResult, check_extra_blocked,
+                      full_command_check, is_sensitive_path,
+                      validate_workspace)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -1140,6 +1146,19 @@ async def api_run_command(task_id: str, body: RunCommandRequest) -> dict:
     rt = get_runtime(task_id)
     if not rt or not rt.workspace:
         raise HTTPException(404, "Task workspace not found")
+    # v0.8.0: when security hardening is enabled, run the enhanced pipeline
+    # (extra blocklist + destructive-arg containment) before execution.
+    s = get_settings()
+    if s.security_hardening_enabled:
+        allowed, reason, _issues = full_command_check(
+            body.command, workspace_root=rt.workspace.root
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=400,
+                content={"command": body.command, "error": reason,
+                         "success": False, "returncode": 126},
+            )
     try:
         result = _run(body.command, rt.workspace, rt=rt)
         return {
@@ -1657,6 +1676,85 @@ async def api_export_history(
 
 
 # ── Frontend ────────────────────────────────────────────────────────────
+
+# v0.8.0 Phase 9: Security hardening endpoints
+
+
+@app.get("/api/security/workspace/{name}")
+async def api_validate_workspace(name: str) -> WorkspaceValidationOut:
+    """Validate a named workspace for safety (symlinks, permissions, containment).
+
+    Walks the workspace directory and checks that no symlinks escape the
+    workspace root, no directories are world-writable, and the workspace
+    is contained within the configured ``workspace_root``.
+    """
+    s = get_settings()
+    # Resolve the workspace path the same way workspace_manager does.
+    from workspace_manager import _path as _wm_path
+    try:
+        ws_dir = _wm_path(s, name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not ws_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Workspace '{name}' not found.")
+    try:
+        result = validate_workspace(
+            ws_dir,
+            workspace_root=str(s.workspace_root),
+            max_files=s.security_max_workspace_files,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return WorkspaceValidationOut(
+        valid=result.valid,
+        root=result.root,
+        issues=result.issues,
+        checked_files=result.checked_files,
+        checked_dirs=result.checked_dirs,
+        symlinks=result.symlinks,
+    )
+
+
+@app.post("/api/security/check-command")
+async def api_check_command(req: CommandCheckRequest) -> CommandCheckOut:
+    """Dry-run validate a command against the full security pipeline.
+
+    Runs the extra blocklist, existing terminal validation, and destructive-
+    argument containment.  Does **not** execute the command.
+    """
+    s = get_settings()
+    ws_root = None
+    if s.security_hardening_enabled:
+        ws_root = Path(s.workspace_root).resolve()
+    allowed, reason, issues = full_command_check(
+        req.command, workspace_root=ws_root
+    )
+    return CommandCheckOut(allowed=allowed, reason=reason, issues=issues)
+
+
+@app.post("/api/security/sensitive-path")
+async def api_sensitive_path(req: SensitivePathRequest) -> SensitivePathOut:
+    """Check whether a path looks like a sensitive file (secrets/keys)."""
+    return SensitivePathOut(
+        sensitive=is_sensitive_path(req.path), path=req.path
+    )
+
+
+@app.get("/api/security/status")
+async def api_security_status() -> dict:
+    """Return the current security configuration (no secrets)."""
+    import security as _sec
+    s = get_settings()
+    return {
+        "security_hardening_enabled": s.security_hardening_enabled,
+        "max_workspace_files": s.security_max_workspace_files,
+        "command_timeout_seconds": s.command_timeout_seconds,
+        "extra_blocked_patterns": len(_sec.EXTRA_BLOCKED_PATTERNS),
+        "sensitive_patterns": len(_sec.SENSITIVE_PATTERNS),
+        "destructive_programs": sorted(_sec.DESTRUCTIVE_PROGRAMS),
+    }
+
+
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 
 
