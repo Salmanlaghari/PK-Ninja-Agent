@@ -395,3 +395,51 @@ class RecoveryActionRequest(BaseModel):
 
     task_id: str
     reason: Optional[str] = None
+
+
+# ── v0.8.0 Job History models ──────────────────────────────────────────────
+class HistoryEventPreview(BaseModel):
+    type: str
+    message: str
+    timestamp: str
+
+
+class HistoryItemOut(BaseModel):
+    task_id: str
+    description: str
+    status: str
+    repo: Optional[str] = None
+    branch: Optional[str] = None
+    created_at: str
+    updated_at: str
+    event_count: Optional[int] = None
+    first_event_at: Optional[str] = None
+    last_event_at: Optional[str] = None
+    events: Optional[List[HistoryEventPreview]] = Field(default=None)
+
+
+class HistoryListOut(BaseModel):
+    items: List[HistoryItemOut] = Field(default_factory=list)
+    count: int = 0
+    limit: int = 100
+    offset: int = 0
+    filters: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HistoryDetailOut(BaseModel):
+    task_id: str
+    description: str
+    status: str
+    repo: Optional[str] = None
+    branch: Optional[str] = None
+    created_at: str
+    updated_at: str
+    events: List[EventOut] = Field(default_factory=list)
+    event_count: int = 0
+
+
+class HistoryStatsOut(BaseModel):
+    total_tasks: int = 0
+    by_status: Dict[str, int] = Field(default_factory=dict)
+    by_repo: Dict[str, int] = Field(default_factory=dict)
+    total_events: int = 0

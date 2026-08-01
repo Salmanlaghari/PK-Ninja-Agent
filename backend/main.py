@@ -57,6 +57,7 @@ from workspace_manager import (WorkspaceManagerError, create_workspace,
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
+                    HistoryDetailOut, HistoryListOut, HistoryStatsOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
                     ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
@@ -81,6 +82,7 @@ from sessions import (close_session as _close_session, create_session,
 from monitor import monitor_snapshot, psutil_available, system_metrics
 from recovery import (detect_interrupted, mark_task_failed, recovery_summary,
                       resume_task)
+from history import (get_job_detail, history_stats, query_history)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -1555,6 +1557,47 @@ async def api_recovery_resume(body: RecoveryActionRequest) -> dict:
     desc = row.get("description") or ""
     resume_task(body.task_id, desc, repo, start_task)
     return {"task_id": body.task_id, "status": "running", "resumed": True}
+
+
+# -- v0.8.0 Job History ------------------------------------------------------
+@app.get("/api/history")
+async def api_history(
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_events: int = 0,
+) -> dict:
+    """Searchable, filterable job history over the tasks + events tables."""
+    result = await query_history(
+        repo=repo,
+        status=status,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+        include_events=include_events,
+    )
+    return result
+
+
+@app.get("/api/history/{task_id}")
+async def api_history_detail(task_id: str) -> dict:
+    """Full detail for one historical job including its event log."""
+    detail = await get_job_detail(task_id)
+    if not detail:
+        raise HTTPException(404, "Task not found in history")
+    return detail
+
+
+@app.get("/api/history-stats")
+async def api_history_stats() -> dict:
+    """Aggregate statistics over the entire task history."""
+    return await history_stats()
 
 
 # ── Frontend ────────────────────────────────────────────────────────────
