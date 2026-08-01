@@ -60,7 +60,8 @@ from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
                     ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
-                    QueueListOut, ReorderRequest, RetryRequest, SessionActionRequest,
+                    QueueListOut, RecoveryActionRequest, RecoverySummaryOut,
+                    ReorderRequest, RetryRequest, SessionActionRequest,
                     SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
                     SystemHealthComponent, SystemHealthOut, TaskCreate,
                     TaskQueueItem, TaskStatus, TaskSummary, UserOut,
@@ -78,6 +79,8 @@ from sessions import (close_session as _close_session, create_session,
                       delete_session as _delete_session, find_active_for_repo,
                       get_session, list_sessions, touch_session)
 from monitor import monitor_snapshot, psutil_available, system_metrics
+from recovery import (detect_interrupted, mark_task_failed, recovery_summary,
+                      resume_task)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pk_ninja.main")
@@ -1505,6 +1508,53 @@ async def api_monitor() -> dict:
 async def api_monitor_system() -> dict:
     """System-wide resource metrics only (lightweight poll)."""
     return system_metrics()
+
+
+# ── Autonomous Execution Engine — Recovery System (v0.8.0) ─────────────────
+
+@app.get("/api/recovery")
+async def api_recovery_detect() -> dict:
+    """Detect interrupted tasks (live status but no in-memory runtime)."""
+    interrupted = await detect_interrupted(db_list_tasks, lambda tid: get_runtime(tid) is not None)
+    fresh = get_settings()
+    summary = recovery_summary(interrupted)
+    summary["auto_resume"] = bool(getattr(fresh, "recovery_auto_resume", False))
+    summary["interrupted"] = interrupted
+    return summary
+
+
+@app.post("/api/recovery/mark-failed")
+async def api_recovery_mark_failed(body: RecoveryActionRequest) -> dict:
+    """Mark an interrupted task as failed (terminal). Preserves logs."""
+    rt = get_runtime(body.task_id)
+    if rt is not None:
+        raise HTTPException(409, "Task still has a live runtime; cancel it first.")
+    row = await db_get_task(body.task_id)
+    if not row:
+        raise HTTPException(404, "Task not found")
+
+    async def _update(tid: str, status: str) -> None:
+        await db_update_task_status(tid, TaskStatus(status), branch=None)
+
+    await mark_task_failed(_update, body.task_id,
+                           reason=body.reason or "interrupted")
+    return {"task_id": body.task_id, "status": "failed",
+            "reason": body.reason or "interrupted"}
+
+
+@app.post("/api/recovery/resume")
+async def api_recovery_resume(body: RecoveryActionRequest) -> dict:
+    """Re-run an interrupted task from scratch (fresh execution, reused context)."""
+    rt = get_runtime(body.task_id)
+    if rt is not None:
+        raise HTTPException(409, "Task already has a live runtime.")
+    row = await db_get_task(body.task_id)
+    if not row:
+        raise HTTPException(404, "Task not found")
+    repo = row.get("repo") or ""
+    desc = row.get("description") or ""
+    resume_task(body.task_id, desc, repo, start_task)
+    return {"task_id": body.task_id, "status": "running", "resumed": True}
 
 
 # ── Frontend ────────────────────────────────────────────────────────────

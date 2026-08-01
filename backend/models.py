@@ -382,3 +382,16 @@ class SessionActionRequest(BaseModel):
     """Operate on a session by id."""
 
     session_id: str
+
+
+class RecoverySummaryOut(BaseModel):
+    interrupted_count: int
+    interrupted_task_ids: List[str] = Field(default_factory=list)
+    auto_resume: bool = False
+
+
+class RecoveryActionRequest(BaseModel):
+    """Act on an interrupted task."""
+
+    task_id: str
+    reason: Optional[str] = None
