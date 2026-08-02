@@ -1,8 +1,0 @@
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "backend/main.py": {
-      "excludeFiles": "{tests/**,__pycache__/**,**/__pycache__/**,*.pyc,outputs/**,tmp/**,summarized_conversations/**,.browser_data/**,.psiphon_data/**,.screenshots/**,workspaces/**,FINAL_REPORT_*.md,DEPLOYMENT_RESEARCH.md,JULES_API_RESEARCH.md,*.db,*.db-journal,*.db-wal,*.db-shm,docs/**,scripts/**}"
-    }
-  }
-}
