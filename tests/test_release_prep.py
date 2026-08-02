@@ -76,7 +76,7 @@ class TestHealthEndpoints:
         c = _build_client()
         r = c.get("/health")
         assert r.status_code == 200
-        assert r.json().get("version") == "1.0.1"
+        assert r.json().get("version") == "1.0.2"
 
     def test_system_health_status_values(self):
         c = _build_client()
@@ -106,7 +106,7 @@ class TestReleaseChecksModule:
         import release_checks as rc
         sh = rc.system_health(config.get_settings())
         assert sh["status"] in ("ok", "degraded", "down")
-        assert sh["version"] == "1.0.1"
+        assert sh["version"] == "1.0.2"
         assert "components" in sh
         assert "environment" in sh
 
