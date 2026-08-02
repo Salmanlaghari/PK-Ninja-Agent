@@ -48,6 +48,7 @@
     <button class="tab-btn" data-tab="tab-explorer">📂 Explorer</button>
     <button class="tab-btn" data-tab="tab-git">⏧ Git</button>
     <button class="tab-btn" data-tab="tab-diff">∆ Diff</button>
+    <button class="tab-btn" data-tab="tab-settings">⚙ Settings</button>
   </nav>
 
   <!-- Main Grid Workspace Container -->
@@ -467,22 +468,24 @@
     </div>
   </div>
 
-  <!-- Login Screen (shown only when auth is enabled and no session) -->
+  <!-- Login / GitHub Connect Screen
+       Shown when: (a) auth is enabled and no session, or (b) auth is disabled
+       but the user hasn't connected GitHub yet (welcome gate). -->
   <div id="login-overlay" class="login-overlay" hidden>
     <div class="login-card">
       <div class="login-brand">
         <span class="brand-icon">🥷</span>
         <span class="name"><b>NinjaDev</b><span>AI Coding Workspace</span></span>
       </div>
-      <h2 class="login-title">Sign in to continue</h2>
-      <p class="login-sub">Authentication is enabled for this deployment.</p>
+      <h2 id="login-title" class="login-title">Connect GitHub to start</h2>
+      <p id="login-sub" class="login-sub">Connect your GitHub account to create repos, run the AI agent, and deploy code. Your token is verified and stored securely.</p>
 
       <div id="login-github-section" class="login-section">
-        <label class="login-label" for="login-github-token">Sign in with GitHub</label>
+        <label class="login-label" for="login-github-token">Connect with GitHub</label>
         <input id="login-github-token" class="login-input" type="password"
           placeholder="Paste a GitHub personal access token" autocomplete="off" spellcheck="false" />
-        <button id="btn-login-github" class="btn primary login-btn">Sign in with GitHub</button>
-        <p class="login-hint">Your token is verified against the GitHub API and never stored server-side. Need a token? <a class="apikey-link" href="https://github.com/settings/tokens/new?description=NinjaDev%20Agent&scopes=repo,workflow" target="_blank" rel="noopener">Create one →</a></p>
+        <button id="btn-login-github" class="btn primary login-btn">Connect GitHub</button>
+        <p class="login-hint">Your token is verified against the GitHub API and stored encrypted. Need a token? <a class="apikey-link" href="https://github.com/settings/tokens/new?description=NinjaDev%20Agent&scopes=repo,workflow" target="_blank" rel="noopener">Create one →</a></p>
       </div>
 
       <div class="login-divider-row">
@@ -490,10 +493,8 @@
       </div>
 
       <div class="login-section">
-        <label class="login-label" for="login-guest-name">Guest display name (optional)</label>
-        <input id="login-guest-name" class="login-input" type="text"
-          placeholder="e.g. Ninja" autocomplete="off" spellcheck="false" />
-        <button id="btn-login-guest" class="btn ghost login-btn">Continue as Guest</button>
+        <p class="login-hint" style="margin-bottom:8px;">Skip for now — you can connect GitHub later from Settings.</p>
+        <button id="btn-login-guest" class="btn ghost login-btn">Continue without GitHub</button>
       </div>
 
       <div id="login-error" class="login-error" hidden></div>

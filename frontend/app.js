@@ -62,6 +62,19 @@ const Auth = (() => {
   function showLogin() {
     const ov = $("login-overlay");
     if (ov) ov.hidden = false;
+    // Adapt the overlay text depending on whether this is an auth login
+    // (AUTH_ENABLED=true) or a GitHub connect welcome gate (auth disabled).
+    const titleEl = $("login-title");
+    const subEl = $("login-sub");
+    if (titleEl && subEl) {
+      if (authEnabled) {
+        titleEl.textContent = "Sign in to continue";
+        subEl.textContent = "Authentication is enabled for this deployment.";
+      } else {
+        titleEl.textContent = "Connect GitHub to start";
+        subEl.textContent = "Connect your GitHub account to create repos, run the AI agent, and deploy code. Your token is verified and stored securely.";
+      }
+    }
     document.body.classList.add("app-booting");
   }
   function hideLogin() {
@@ -111,6 +124,14 @@ const Auth = (() => {
   async function loginGuest() {
     showError("");
     const name = ($("login-guest-name") || {}).value || "Guest";
+    // When auth is disabled, "Continue without GitHub" just dismisses the
+    // welcome gate — no server call needed. Set the localStorage flag so the
+    // user isn't prompted again.
+    if (!authEnabled) {
+      localStorage.setItem("pk_ninja_gh_connected", "1");
+      hideLogin(); onAuthSuccess();
+      return true;
+    }
     try {
       const r = await _origFetch("/api/auth/guest", {
         method: "POST",
@@ -120,6 +141,7 @@ const Auth = (() => {
       if (!r.ok) { showError("Guest login failed (" + r.status + ")."); return false; }
       const body = await r.json();
       if (body.session) { setToken(body.session); setUser(body.user); currentUser = body.user; }
+      localStorage.setItem("pk_ninja_gh_connected", "1");
       hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
     } catch (e) { showError("Network error during guest login."); return false; }
   }
@@ -128,6 +150,29 @@ const Auth = (() => {
     showError("");
     const tok = ($("login-github-token") || {}).value || "";
     if (!tok.trim()) { showError("Please paste a GitHub token."); return false; }
+    // When auth is disabled, use /api/github/connect (stores the token for
+    // the agent). When auth is enabled, use /api/auth/github (creates a
+    // session). Both verify the token against GitHub's /user endpoint.
+    if (!authEnabled) {
+      try {
+        const r = await _origFetch("/api/github/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ github_token: tok.trim() }),
+        });
+        if (!r.ok) {
+          let msg = "GitHub connect failed (" + r.status + ").";
+          try { const b = await r.json(); if (b.detail) msg = b.detail; } catch {}
+          showError(msg); return false;
+        }
+        const body = await r.json();
+        localStorage.setItem("pk_ninja_gh_connected", "1");
+        ($("login-github-token") || {}).value = "";
+        hideLogin(); onAuthSuccess();
+        return true;
+      } catch (e) { showError("Network error during GitHub connect."); return false; }
+    }
+    // Auth enabled path (original):
     try {
       const r = await _origFetch("/api/auth/github", {
         method: "POST",
@@ -141,6 +186,7 @@ const Auth = (() => {
       }
       const body = await r.json();
       setToken(body.session); setUser(body.user); currentUser = body.user;
+      localStorage.setItem("pk_ninja_gh_connected", "1");
       ($("login-github-token") || {}).value = "";
       hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
     } catch (e) { showError("Network error during GitHub login."); return false; }
@@ -2194,6 +2240,17 @@ function switchMobileTab(targetTabId) {
       activeEl.classList.add("active-tab");
     }
   }
+  // Special case: the Settings mobile tab opens the settings modal (which
+  // is an overlay, not a workspace panel).
+  if (targetTabId === "tab-settings") {
+    const m = $("settings-modal");
+    if (m) m.hidden = false;
+    if (typeof Settings !== "undefined") Settings.load();
+  } else {
+    // Close settings modal when switching to a different tab.
+    const m = $("settings-modal");
+    if (m) m.hidden = true;
+  }
 }
 
 // Register mobile tab clicks
@@ -2361,6 +2418,17 @@ async function bootApp() {
     UI.hideLoading();
     Auth.showLogin();
     return; // app init deferred until login succeeds
+  }
+  // GitHub Connect gate: when auth is disabled, show a GitHub connect
+  // welcome screen to new users before the app opens. Returning users who
+  // have already connected (or chosen to skip) go straight to the app.
+  if (!enabled) {
+    const ghConnected = localStorage.getItem("pk_ninja_gh_connected");
+    if (ghConnected !== "1") {
+      UI.hideLoading();
+      Auth.showLogin();
+      return; // app init deferred until GitHub connect / guest continue
+    }
   }
   Auth.renderUserMenu();
   loadRepo();

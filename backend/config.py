@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     # Comma-separated fallback order (overrides the auto-built chain).
     # Empty means "use the auto-built chain (active first, then compatible)."
     provider_fallback_order: str = Field(default="", alias="PROVIDER_FALLBACK_ORDER")
+    # Comma-separated list of provider names to HIDE from the frontend /api/providers
+    # and /api/config responses. Hidden providers remain fully enabled in the backend
+    # (can be active, can serve as fallback) — they are simply not shown in the UI.
+    # This is useful for providers like Jules that should work transparently for all
+    # users without appearing in the provider selection list.
+    provider_hidden_list: str = Field(default="", alias="PROVIDER_HIDDEN")
     # When true, the agent loop uses the ProviderManager instead of the plain
     # get_provider() factory. Default false preserves existing behaviour.
     provider_manager_enabled: bool = Field(default=False, alias="PROVIDER_MANAGER_ENABLED")
@@ -305,6 +311,15 @@ class Settings(BaseSettings):
         if not self.provider_fallback_order.strip():
             return []
         return [n.strip() for n in self.provider_fallback_order.split(",") if n.strip()]
+
+    def provider_hidden_names(self) -> list:
+        """Parse PROVIDER_HIDDEN into a list of provider names to hide from
+        the frontend (empty = none hidden). Hidden providers stay enabled in
+        the backend — they are just not surfaced in /api/providers or
+        /api/config."""
+        if not self.provider_hidden_list.strip():
+            return []
+        return [n.strip() for n in self.provider_hidden_list.split(",") if n.strip()]
 
 
 @lru_cache

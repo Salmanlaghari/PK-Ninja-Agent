@@ -1314,6 +1314,9 @@ textarea:focus, .task-input:focus, .term-input:focus, .settings-input:focus, .lo
   .tab-content.active { display: block; }
   #tab-task { display: block; }
   .header-right .header-btn { display: none; }
+  /* Keep the Settings button visible on mobile — it's the primary way to
+     access GitHub connection, provider config, and app preferences. */
+  .header-right #btn-settings { display: inline-flex; }
 }
 
 @media (max-width: 640px) {

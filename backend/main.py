@@ -1123,6 +1123,7 @@ async def api_config() -> dict:
     # minimal so the existing secret-leak guard continues to pass.
     providers_summary = None
     manager_enabled = getattr(fresh, "provider_manager_enabled", False)
+    hidden = set(fresh.provider_hidden_names())
     try:
         from providers import get_manager
         mgr = get_manager(fresh)
@@ -1137,6 +1138,7 @@ async def api_config() -> dict:
                 "capability": info.capability.to_dict(),
             }
             for name, info in mgr.all_info().items()
+            if name not in hidden
         }
     except Exception:  # noqa: BLE001 — never let provider UI break /api/config
         providers_summary = None
@@ -1200,19 +1202,35 @@ def _provider_info_to_out(info) -> ProviderInfoOut:
 
 @app.get("/api/providers")
 async def api_providers() -> dict:
-    """Return the full provider manager status (no secrets)."""
+    """Return the full provider manager status (no secrets).
+
+    Providers listed in the ``PROVIDER_HIDDEN`` env var are excluded from this
+    response so they don't appear in the frontend provider selection UI. They
+    remain fully enabled in the backend manager and can serve as the active or
+    fallback provider — they are simply not surfaced to the user.
+    """
     mgr = _provider_manager()
+    fresh = get_settings()
+    hidden = set(fresh.provider_hidden_names())
     status = mgr.status()
     active_cap = status.get("active_capability")
     active_health = status.get("active_health")
     providers_out = {
         name: _provider_info_to_out(info)
         for name, info in mgr.all_info().items()
+        if name not in hidden
     }
+    # Also filter the active/available/fallback_chain fields so a hidden
+    # provider name never leaks into the UI via those fields.
+    active_name = status.get("active")
+    if active_name in hidden:
+        active_name = None
+    available = [n for n in status.get("available", []) if n not in hidden]
+    fallback_chain = [n for n in status.get("fallback_chain", []) if n not in hidden]
     return ProviderManagerStatusOut(
-        active=status.get("active"),
-        available=status.get("available", []),
-        fallback_chain=status.get("fallback_chain", []),
+        active=active_name,
+        available=available,
+        fallback_chain=fallback_chain,
         active_capability=ProviderCapabilityOut(**active_cap) if active_cap else None,
         active_health=ProviderHealthOut(**active_health) if active_health else None,
         providers=providers_out,
