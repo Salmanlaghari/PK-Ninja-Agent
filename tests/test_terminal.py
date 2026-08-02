@@ -15,12 +15,12 @@ def test_real_echo_captures_stdout(workspace):
 
 
 def test_real_failure_captures_exit_code_and_stderr(workspace):
-    res = _run(workspace, "python -c 'import sys; sys.exit(3)'")
+    res = _run(workspace, "python3 -c 'import sys; sys.exit(3)'")
     assert res.returncode == 3
 
 
 def test_stderr_captured(workspace):
-    res = _run(workspace, "python -c 'import sys; sys.stderr.write(\"boom\\n\")'")
+    res = _run(workspace, "python3 -c 'import sys; sys.stderr.write(\"boom\\n\")'")
     assert "boom" in res.stderr
 
 
@@ -57,7 +57,7 @@ def test_empty_command_rejected(workspace):
 def test_timeout_enforced(workspace, monkeypatch):
     # Force a tiny timeout and a long sleep.
     workspace.settings.command_timeout_seconds = 1
-    res = _run(workspace, "python -c 'import time; time.sleep(10)'")
+    res = _run(workspace, "python3 -c 'import time; time.sleep(10)'")
     assert res.returncode == 124
     assert "timed out" in res.stderr.lower()
 
@@ -70,7 +70,7 @@ def test_validate_command_warning_for_rm():
 
 
 def test_validate_command_allows_python():
-    d = validate_command("python -m pytest")
+    d = validate_command("python3 -m pytest")
     assert d.allowed
 
 
@@ -113,7 +113,7 @@ def test_allows_workspace_relative_path():
 
 
 def test_allows_python_version_no_path_issue():
-    d = validate_command("python --version")
+    d = validate_command("python3 --version")
     assert d.allowed
     d2 = validate_command("python3 -c 'print(1)'")
     assert d2.allowed

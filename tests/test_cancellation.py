@@ -46,7 +46,7 @@ def test_cancel_kills_running_subprocess(workspace):
     # Start a long sleep in a background thread so we can cancel mid-run.
     holder = {}
     def _runner():
-        res = run_command("python -c 'import time; time.sleep(30)'",
+        res = run_command("python3 -c 'import time; time.sleep(30)'",
                           workspace, rt=rt)
         holder["result"] = res
 

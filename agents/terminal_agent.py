@@ -120,7 +120,7 @@ class TerminalAgent(BaseAgent):
         if ctx.edits:
             changed_py = [e["path"] for e in ctx.edits if e["path"].endswith(".py")]
             if changed_py:
-                cmds.append("python -m py_compile " + " ".join(changed_py[:10]))
+                cmds.append("python3 -m py_compile " + " ".join(changed_py[:10]))
         return cmds
 
 

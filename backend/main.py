@@ -95,7 +95,16 @@ from security import (WorkspaceValidationResult, check_extra_blocked,
                       full_command_check, is_sensitive_path,
                       validate_workspace)
 
-logging.basicConfig(level=logging.INFO)
+from structured_logging import setup_logging, RequestLoggingMiddleware
+from shutdown import register_shutdown_handlers
+
+# Configure structured logging (JSON in production, plain in dev)
+_app_env = os.environ.get("APP_ENV", "development")
+setup_logging(
+    json_format=_app_env == "production",
+    log_level=os.environ.get("LOG_LEVEL", "INFO"),
+    log_file=os.environ.get("LOG_FILE"),
+)
 log = logging.getLogger("pk_ninja.main")
 
 # ── SQLite persistence ──────────────────────────────────────────────────
@@ -298,7 +307,18 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.8.0")
+app = FastAPI(title="PK Ninja Agent", version="0.9.0")
+
+# ── Production middleware & lifecycle ──────────────────────────────────────
+app.add_middleware(RequestLoggingMiddleware)
+register_shutdown_handlers(app)
+
+# Metrics (optional — graceful degradation if prometheus_client not installed)
+try:
+    from metrics import setup_metrics
+    setup_metrics(app)
+except Exception as exc:
+    log.info("Metrics setup skipped: %s", exc)
 
 # ── Error handlers (v0.7.0 release prep) ──────────────────────────────────────
 @app.exception_handler(404)
@@ -692,7 +712,7 @@ async def _startup() -> None:
                 log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
-    log.info("PK Ninja Agent v0.8.0 started (env=%s). DB at %s",
+    log.info("PK Ninja Agent v0.9.0 started (env=%s). DB at %s",
              env, s.db_path)
     # v0.8.0 — Autonomous Execution Engine: initialise the scheduler + worker
     # when opted in. When disabled (default), the original fire-and-forget
@@ -721,7 +741,7 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.8.0"}
+    return {"status": "ok", "version": "0.9.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

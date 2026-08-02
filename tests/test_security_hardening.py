@@ -474,8 +474,9 @@ class TestSecurityAPI:
         from fastapi.testclient import TestClient
         client = TestClient(_main.app)
 
-        client.post("/api/workspaces", json={"name": "sectest2"})
+        resp = client.post("/api/workspaces", json={"name": "sectest2"})
         ws_path = tmp_path / "wsroot" / "sectest2"
+        ws_path.mkdir(parents=True, exist_ok=True)
         (ws_path / "main.py").write_text("ok")
         # Symlink to a file outside the workspace root
         outside = tmp_path / "outside_secret.txt"

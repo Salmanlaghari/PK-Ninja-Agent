@@ -132,11 +132,11 @@ class TestingAgent(BaseAgent):
         if "pytest.ini" in files or any(
             f.startswith("tests/") and f.endswith(".py") for f in files
         ) or any(f.endswith("conftest.py") for f in files):
-            return "python -m pytest -q"
+            return "python3 -m pytest -q"
         if "setup.py" in files or "pyproject.toml" in files:
             py = [f for f in files if f.endswith(".py") and "/" not in f]
             if py:
-                return "python -m py_compile " + " ".join(py[:10])[:200]
+                return "python3 -m py_compile " + " ".join(py[:10])[:200]
         if "package.json" in files:
             return "npm test"
         if "Cargo.toml" in files:
@@ -145,7 +145,7 @@ class TestingAgent(BaseAgent):
             return "go build ./..."
         py_files = [f for f in files if f.endswith(".py")]
         if py_files:
-            return "python -m py_compile " + " ".join(py_files[:5])
+            return "python3 -m py_compile " + " ".join(py_files[:5])
         return None
 
     def _analyze_failure(self, ctx: AgentContext, report: Dict[str, Any]) -> str:
