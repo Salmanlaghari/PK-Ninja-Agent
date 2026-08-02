@@ -2,6 +2,33 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — Public Deployment
+
+Deployment-ready release with multi-platform deployment support, production configuration templates, and comprehensive deployment documentation.
+
+### Added
+- `render.yaml` — Render Blueprint for one-click deployment.
+- `fly.toml` — Fly.io configuration for container deployment.
+- `.env.production` — Production environment template with all variables documented.
+- Comprehensive `DEPLOYMENT.md` with guides for Render, Fly.io, Docker, and self-hosted.
+- HTTPS and custom domain configuration documentation.
+- Production checklist and monitoring guide.
+
+### Changed
+- Version bumped from 1.0.0 to 1.0.1.
+- Fixed flaky `test_validate_workspace_symlink_escape` (proper symlink cleanup before creation).
+
+### Fixed
+- Flaky security test now properly cleans up existing symlinks before creating new ones.
+
+### Deployment
+- **Render**: One-click via `render.yaml` blueprint.
+- **Fly.io**: One-command via `fly launch --copy-config`.
+- **Docker**: `docker compose up -d` with `.env.production`.
+- **GHCR**: `docker pull ghcr.io/salmanlaghari/pk-ninja-agent:1.0.1`.
+
+---
+
 ## [1.0.0] — Stable Release
 
 The first official stable release of PK Ninja Agent. This release focuses on stability, quality, performance, and comprehensive documentation. No new features — only hardening, cleanup, and polish of the existing production-ready codebase.
