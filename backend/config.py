@@ -65,8 +65,108 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
+    # ── Jules (Google's async coding agent) — official REST API (v1.1.0) ────
+    # Dedicated API key for the official Jules API at
+    # https://jules.googleapis.com/v1alpha. Auth uses the x-goog-api-key
+    # header. Falls back to AI_API_KEY / GEMINI_API_KEY for convenience.
+    jules_api_key: str = Field(default="", alias="JULES_API_KEY")
+    # Optional override for the Jules API base URL.
+    jules_base_url: str = Field(
+        default="https://jules.googleapis.com/v1alpha", alias="JULES_BASE_URL"
+    )
+    # Polling interval (seconds) when waiting for a Jules session to reach a
+    # terminal state (COMPLETED / FAILED).
+    jules_poll_interval_seconds: float = Field(
+        default=3.0, alias="JULES_POLL_INTERVAL"
+    )
+    # Maximum total seconds to poll a single session before timing out.
+    jules_poll_timeout_seconds: int = Field(
+        default=600, alias="JULES_POLL_TIMEOUT"
+    )
+    # Maximum number of HTTP retries on transient failures (429/5xx/network).
+    jules_max_retries: int = Field(default=3, alias="JULES_MAX_RETRIES")
+
+    # ── Provider Plugin System (v0.6.0) ─────────────────────────────────
+    # Comma-separated list of provider names to enable (others are disabled).
+    # Empty means "all built-in adapters enabled". Server-side only.
+    provider_enabled_list: str = Field(default="", alias="PROVIDER_ENABLED")
+    # Comma-separated fallback order (overrides the auto-built chain).
+    # Empty means "use the auto-built chain (active first, then compatible)."
+    provider_fallback_order: str = Field(default="", alias="PROVIDER_FALLBACK_ORDER")
+    # When true, the agent loop uses the ProviderManager instead of the plain
+    # get_provider() factory. Default false preserves existing behaviour.
+    provider_manager_enabled: bool = Field(default=False, alias="PROVIDER_MANAGER_ENABLED")
+    # Health-check interval in seconds (0 = disable periodic probing).
+    provider_health_interval_seconds: int = Field(default=0, alias="PROVIDER_HEALTH_INTERVAL")
+
     # Terminal safety
     command_timeout_seconds: int = Field(default=30, alias="COMMAND_TIMEOUT_SECONDS")
+
+    # ── Authentication (v0.7.0, opt-in) ─────────────────────────────────────
+    # When false (default) no authentication is required — every request is
+    # treated as an anonymous guest. This preserves backward compatibility.
+    auth_enabled: bool = Field(default=False, alias="AUTH_ENABLED")
+    # Allow guest mode (no GitHub login) when auth is enabled.
+    auth_guest_allowed: bool = Field(default=True, alias="AUTH_GUEST_ALLOWED")
+    # Allow "Sign in with GitHub" (token-based verification against /user).
+    auth_github_enabled: bool = Field(default=False, alias="AUTH_GITHUB_ENABLED")
+    # HMAC secret for signing session tokens. If empty, a random per-process
+    # secret is used (sessions won't survive a restart — fine for dev/tests).
+    auth_secret: str = Field(default="", alias="AUTH_SECRET")
+    # Session lifetimes (seconds).
+    auth_guest_ttl_seconds: int = Field(default=14400, alias="AUTH_GUEST_TTL_SECONDS")
+    auth_user_ttl_seconds: int = Field(default=604800, alias="AUTH_USER_TTL_SECONDS")
+
+    # ── User preferences / beta settings (v0.7.0) ───────────────────────────
+    # Default theme: "shinobi" (dark) or "light".
+    default_theme: str = Field(default="shinobi", alias="DEFAULT_THEME")
+    # Auto-save edited files before running commands/tests.
+    auto_save_enabled: bool = Field(default=True, alias="AUTO_SAVE_ENABLED")
+    # Auto-commit after a successful task (optional, off by default).
+    auto_commit_enabled: bool = Field(default=False, alias="AUTO_COMMIT_ENABLED")
+    # In-app notifications for task completion / errors.
+    notifications_enabled: bool = Field(default=True, alias="NOTIFICATIONS_ENABLED")
+
+    # ── Release / deployment (v0.7.0) ───────────────────────────────────────
+    # Environment label: "development" (default), "staging", "production".
+    app_env: str = Field(default="development", alias="APP_ENV")
+    # Debug mode (verbose logging, detailed error pages). Off in production.
+    debug: bool = Field(default=False, alias="DEBUG")
+    # Public site URL (for About / links). Optional.
+    site_url: str = Field(default="", alias="SITE_URL")
+
+    # ── Multi-Agent Architecture (opt-in, Phase 9) ────────────────────────────
+    # When True, the agent loop delegates orchestration to the AgentCoordinator
+    # (agents.coordinator) which runs the 7 specialized agents. Defaults to
+    # False so the original single-agent loop remains the stable default and
+    # the UI/API surface is unchanged.
+    multi_agent_enabled: bool = Field(default=False, alias="MULTI_AGENT_ENABLED")
+
+    # ── Autonomous Execution Engine (v0.8.0, opt-in) ─────────────────────
+    # When True, POST /api/tasks enqueues into the TaskScheduler instead of
+    # starting immediately. A background worker drains the queue. Defaults to
+    # False so the existing fire-and-forget start_task() path is unchanged
+    # (backward compatible).
+    scheduler_enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
+    # Maximum number of tasks the worker may run concurrently (>=1).
+    worker_max_concurrency: int = Field(default=2, alias="WORKER_MAX_CONCURRENCY")
+    # How often (seconds) the worker loop polls the queue when idle.
+    worker_poll_interval_seconds: float = Field(default=1.0, alias="WORKER_POLL_INTERVAL_SECONDS")
+    # Default retry count for tasks that fail (applied by the scheduler retry).
+    scheduler_default_retries: int = Field(default=1, alias="SCHEDULER_DEFAULT_RETRIES")
+    # Default priority for newly enqueued tasks (higher = sooner).
+    scheduler_default_priority: int = Field(default=5, alias="SCHEDULER_DEFAULT_PRIORITY")
+    # On startup, attempt to recover interrupted tasks (mark them, optionally
+    # resume). When false, interrupted tasks are merely detected (safe default).
+    recovery_auto_resume: bool = Field(default=False, alias="RECOVERY_AUTO_RESUME")
+    # When True, the v0.8.0 enhanced security pipeline (extra blocklist,
+    # destructive-argument containment, workspace validation) is applied to
+    # every command and workspace. Defaults to False for backward compat —
+    # the existing terminal.validate_command remains the baseline guard.
+    security_hardening_enabled: bool = Field(default=False, alias="SECURITY_HARDENING_ENABLED")
+    # Maximum number of files validate_workspace will scan before aborting
+    # (defence against pathological / zip-bomb workspaces).
+    security_max_workspace_files: int = Field(default=200_000, alias="SECURITY_MAX_WORKSPACE_FILES")
 
     @property
     def workspace_root_path(self) -> Path:
@@ -90,6 +190,27 @@ class Settings(BaseSettings):
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
         return self.ai_model or self.gemini_model
+
+    def effective_jules_key(self) -> str:
+        """Resolve the Jules API key.
+
+        Prefers the dedicated JULES_API_KEY, then falls back to the generic
+        AI_API_KEY and the legacy GEMINI_API_KEY so a single Google key can be
+        reused across providers.
+        """
+        return self.jules_api_key or self.ai_api_key or self.gemini_api_key
+
+    def provider_enabled_names(self) -> list:
+        """Parse PROVIDER_ENABLED into a list of provider names (empty = all)."""
+        if not self.provider_enabled_list.strip():
+            return []
+        return [n.strip() for n in self.provider_enabled_list.split(",") if n.strip()]
+
+    def provider_fallback_names(self) -> list:
+        """Parse PROVIDER_FALLBACK_ORDER into an ordered list (empty = auto)."""
+        if not self.provider_fallback_order.strip():
+            return []
+        return [n.strip() for n in self.provider_fallback_order.split(",") if n.strip()]
 
 
 @lru_cache

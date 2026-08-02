@@ -228,3 +228,20 @@ venv/
 todo.md
 backend/__pycache__/
 tests/__pycache__/
+providers/__pycache__/
+agents/__pycache__/
+None
+# Agent working artifacts
+outputs/
+tmp/
+summarized_conversations/
+.pytest_cache/
+-e 
+# Deployment configs
+.env.production
+
+# Sandbox / browser automation artifacts (not part of the project)
+.browser_data/
+.psiphon_data/
+.screenshots/
+FINAL_REPORT_v1.1.0.md

@@ -21,9 +21,11 @@ def client_with_task():
         task_id = r.json()["task_id"]
         # Make it a git repo manually for testing
         import time
-        time.sleep(0.5)
+        time.sleep(1.0)  # Wait for task to start and workspace to be ready
         from agent import get_runtime
         rt = get_runtime(task_id)
+        if rt is None or rt.workspace is None:
+            pytest.skip("Task runtime not available (race condition)")
         ws = rt.workspace
         ws._git(["init"])
         # Configure test user

@@ -22,6 +22,7 @@ os.environ.setdefault("AI_PROVIDER", "local")
 # Ensure no AI API key leaks into tests (so factory always falls back to local).
 os.environ.pop("AI_API_KEY", None)
 os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("JULES_API_KEY", None)
 # Ensure no GitHub creds leak into tests.
 os.environ.pop("GITHUB_TOKEN", None)
 os.environ.pop("GITHUB_OWNER", None)

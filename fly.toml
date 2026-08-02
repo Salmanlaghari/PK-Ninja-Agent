@@ -1,0 +1,36 @@
+# ── PK Ninja Agent — Fly.io Configuration ───────────────────────────────
+# Deploy: fly launch --copy-config
+
+app = "pk-ninja-agent"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  APP_ENV = "production"
+  AI_PROVIDER = "local"
+  AUTH_ENABLED = "false"
+  DEBUG = "false"
+  LOG_LEVEL = "INFO"
+  DATABASE_PATH = "/app/data/pk_ninja.db"
+  WORKSPACE_ROOT = "/app/workspaces"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 100
+    soft_limit = 80
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[mounts]
+  source = "pk_ninja_data"
+  destination = "/app/data"

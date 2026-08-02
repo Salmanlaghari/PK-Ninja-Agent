@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from workspace import CommandResult, Workspace, WorkspaceError
+from workspace import CommandResult, Workspace
 
 
 # Programs the agent is allowed to invoke. Add cautiously.
@@ -360,7 +360,7 @@ def run_command(command: str, workspace: Workspace,
     # If the task was cancelled mid-run, record it truthfully.
     cancelled = False
     if rt is not None and getattr(rt, "cancel", None) and rt.cancel.is_set():
-        cancelled = True
+        cancelled = True  # noqa: F841
         if not stderr:
             stderr = "Command terminated because the task was cancelled."
 

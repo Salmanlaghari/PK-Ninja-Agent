@@ -16,6 +16,819 @@ const cancelBtn = $("cancel");
 const termInput = $("term-input");
 const termRun = $("term-run");
 
+/* ============================================================= */
+/* v0.7.0 — Authentication & session management                  */
+/*                                                               */
+/* The session token (when auth is enabled) is stored in         */
+/* sessionStorage and automatically attached to every fetch()    */
+/* call via a transparent wrapper. When auth is disabled (the    */
+/* default), this layer is a no-op and the app behaves exactly   */
+/* as before (backward compatible).                              */
+/* ============================================================= */
+
+const Auth = (() => {
+  const TOKEN_KEY = "pk_ninja_session";
+  const USER_KEY = "pk_ninja_user";
+  let authEnabled = false;
+  let currentUser = null;
+
+  function getToken() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
+  function setToken(t) {
+    if (t) sessionStorage.setItem(TOKEN_KEY, t);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  }
+  function getUser() {
+    try { return JSON.parse(sessionStorage.getItem(USER_KEY) || "null"); }
+    catch { return null; }
+  }
+  function setUser(u) {
+    if (u) sessionStorage.setItem(USER_KEY, JSON.stringify(u));
+    else sessionStorage.removeItem(USER_KEY);
+  }
+
+  // Transparent fetch wrapper: attach Authorization header when we have a token.
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    const tok = getToken();
+    if (tok) {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + tok);
+      init.headers = headers;
+    }
+    return _origFetch(input, init);
+  };
+
+  function showLogin() {
+    const ov = $("login-overlay");
+    if (ov) ov.hidden = false;
+    document.body.classList.add("app-booting");
+  }
+  function hideLogin() {
+    const ov = $("login-overlay");
+    if (ov) ov.hidden = true;
+    document.body.classList.remove("app-booting");
+  }
+  function showError(msg) {
+    const el = $("login-error");
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = !msg;
+  }
+  function renderUserMenu() {
+    const menu = $("user-menu");
+    if (!menu) return;
+    if (!authEnabled || !currentUser) { menu.hidden = true; return; }
+    menu.hidden = false;
+    const nameEl = $("user-name");
+    const avEl = $("user-avatar");
+    if (nameEl) nameEl.textContent = currentUser.display_name || currentUser.username || "User";
+    if (avEl) {
+      if (currentUser.avatar_url) {
+        avEl.style.backgroundImage = `url(${currentUser.avatar_url})`;
+      } else {
+        avEl.style.backgroundImage = "";
+        avEl.style.background = "linear-gradient(135deg, var(--accent), var(--purple))";
+      }
+    }
+  }
+
+  async function checkStatus() {
+    try {
+      const r = await _origFetch("/api/auth/status");
+      if (!r.ok) { authEnabled = true; return false; }
+      const body = await r.json();
+      authEnabled = !!body.auth_enabled;
+      currentUser = body.user || getUser();
+      if (currentUser) setUser(currentUser);
+      return authEnabled;
+    } catch (e) {
+      authEnabled = false;
+      return false;
+    }
+  }
+
+  async function loginGuest() {
+    showError("");
+    const name = ($("login-guest-name") || {}).value || "Guest";
+    try {
+      const r = await _origFetch("/api/auth/guest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: name }),
+      });
+      if (!r.ok) { showError("Guest login failed (" + r.status + ")."); return false; }
+      const body = await r.json();
+      if (body.session) { setToken(body.session); setUser(body.user); currentUser = body.user; }
+      hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
+    } catch (e) { showError("Network error during guest login."); return false; }
+  }
+
+  async function loginGithub() {
+    showError("");
+    const tok = ($("login-github-token") || {}).value || "";
+    if (!tok.trim()) { showError("Please paste a GitHub token."); return false; }
+    try {
+      const r = await _origFetch("/api/auth/github", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ github_token: tok }),
+      });
+      if (!r.ok) {
+        let msg = "GitHub login failed (" + r.status + ").";
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch {}
+        showError(msg); return false;
+      }
+      const body = await r.json();
+      setToken(body.session); setUser(body.user); currentUser = body.user;
+      ($("login-github-token") || {}).value = "";
+      hideLogin(); renderUserMenu(); onAuthSuccess(); return true;
+    } catch (e) { showError("Network error during GitHub login."); return false; }
+  }
+
+  function logout() {
+    // Stateless: just clear client-side state. Best-effort server call.
+    _origFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    setToken(""); setUser(""); currentUser = null;
+    renderUserMenu();
+    if (authEnabled) showLogin();
+  }
+
+  // If a request returns 401 and auth is enabled, force re-login.
+  function handle401() {
+    if (!authEnabled) return;
+    setToken(""); setUser(""); currentUser = null;
+    renderUserMenu();
+    showLogin();
+  }
+
+  // Hook called after a successful login (set by bootApp) to run the
+  // deferred app initialisation.
+  let _onAuthSuccess = () => {};
+  function onAuthSuccess() { _onAuthSuccess(); }
+
+  function init() {
+    // Wire login buttons.
+    const bGG = $("btn-login-github");
+    const bG = $("btn-login-guest");
+    const bLO = $("btn-logout");
+    if (bGG) bGG.addEventListener("click", loginGithub);
+    if (bG) bG.addEventListener("click", loginGuest);
+    if (bLO) bLO.addEventListener("click", logout);
+    // Enter key submits GitHub login.
+    const ghInput = $("login-github-token");
+    if (ghInput) ghInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loginGithub();
+    });
+  }
+
+  return {
+    checkStatus, loginGuest, loginGithub, logout, init, handle401,
+    showLogin, hideLogin, renderUserMenu, onAuthSuccess,
+    set onAuthSuccessHook(fn) { _onAuthSuccess = fn; },
+    get isEnabled() { return authEnabled; },
+    get user() { return currentUser; },
+  };
+})();
+
+/* ============================================================= */
+/* v0.7.0 — Settings panel controller                            */
+/* ============================================================= */
+const Settings = (() => {
+  let current = null;
+
+  const fields = {
+    theme: () => $("set-theme"),
+    ai_provider: () => $("set-provider"),
+    default_workspace: () => $("set-workspace"),
+    "term-shell": () => $("set-term-shell"),
+    "term-font": () => $("set-term-font"),
+    "git-fetch": () => $("set-git-fetch"),
+    "git-sign": () => $("set-git-sign"),
+    "git-branch-prefix": () => $("set-git-branch-prefix"),
+    autosave: () => $("set-autosave"),
+    autocommit: () => $("set-autocommit"),
+    notifications: () => $("set-notifications"),
+  };
+
+  function showStatus(msg, ok) {
+    const el = $("settings-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function populateProviderSelect(providers) {
+    const sel = $("set-provider");
+    if (!sel || !providers) return;
+    const cur = sel.value;
+    sel.innerHTML = "";
+    (providers || []).forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.name; o.textContent = p.name;
+      sel.appendChild(o);
+    });
+    if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+
+  function applyToForm(s) {
+    current = s || {};
+    const setVal = (id, v) => { const el = $(id); if (el) el.value = v ?? ""; };
+    const setChk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+    setVal("set-theme", s.theme);
+    setVal("set-provider", s.ai_provider);
+    setVal("set-workspace", s.default_workspace);
+    const tp = s.terminal_preferences || {};
+    setVal("set-term-shell", tp.shell);
+    setVal("set-term-font", tp.font_size);
+    const gp = s.git_preferences || {};
+    setChk("set-git-fetch", gp.auto_fetch);
+    setChk("set-git-sign", gp.sign_commits);
+    setVal("set-git-branch-prefix", gp.default_branch_prefix);
+    setChk("set-autosave", s.auto_save);
+    setChk("set-autocommit", s.auto_commit);
+    setChk("set-notifications", s.notifications);
+  }
+
+  function collectFromForm() {
+    const val = (id) => { const el = $(id); return el ? el.value : ""; };
+    const chk = (id) => { const el = $(id); return el ? el.checked : false; };
+    return {
+      theme: val("set-theme"),
+      ai_provider: val("set-provider"),
+      default_workspace: val("set-workspace"),
+      terminal_preferences: {
+        shell: val("set-term-shell") || "bash",
+        font_size: parseInt(val("set-term-font") || "13", 10) || 13,
+        scrollback: (current && current.terminal_preferences && current.terminal_preferences.scrollback) || 5000,
+      },
+      git_preferences: {
+        auto_fetch: chk("set-git-fetch"),
+        sign_commits: chk("set-git-sign"),
+        default_branch_prefix: val("set-git-branch-prefix") || "feat/",
+      },
+      auto_save: chk("set-autosave"),
+      auto_commit: chk("set-autocommit"),
+      notifications: chk("set-notifications"),
+    };
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/settings");
+      if (!r.ok) return;
+      const s = await r.json();
+      applyToForm(s);
+      // Populate provider dropdown from the providers list if available.
+      try {
+        const pr = await fetch("/api/providers");
+        if (pr.ok) {
+          const body = await pr.json();
+          populateProviderSelect(body.providers || body);
+        }
+      } catch {}
+    } catch (e) {}
+  }
+
+  async function save() {
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectFromForm()),
+      });
+      if (!r.ok) { showStatus("Save failed (" + r.status + ").", false); return; }
+      const s = await r.json();
+      applyToForm(s);
+      showStatus("Settings saved.", true);
+      // Apply theme immediately if a theme switcher is implemented later.
+    } catch (e) { showStatus("Network error saving settings.", false); }
+  }
+
+  async function reset() {
+    const defaults = {
+      theme: "shinobi", ai_provider: "local", default_workspace: "",
+      terminal_preferences: { shell: "bash", font_size: 13, scrollback: 5000 },
+      git_preferences: { auto_fetch: false, sign_commits: false, default_branch_prefix: "feat/" },
+      auto_save: true, auto_commit: false, notifications: true,
+    };
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(defaults),
+      });
+      if (r.ok) { applyToForm(await r.json()); showStatus("Reset to defaults.", true); }
+    } catch (e) { showStatus("Reset failed.", false); }
+  }
+
+  function open() { const m = $("settings-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("settings-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-settings");
+    const bClose = $("settings-close");
+    const bSave = $("settings-save");
+    const bReset = $("settings-reset");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bSave) bSave.addEventListener("click", save);
+    if (bReset) bReset.addEventListener("click", reset);
+    // Click outside the box closes the modal.
+    const overlay = $("settings-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, save, reset, open, close, applyToForm };
+})();
+
+
+/* ============================================================= */
+/* v0.7.0 — Workspaces panel controller                          */
+/* ============================================================= */
+const Workspaces = (() => {
+  function showStatus(msg, ok) {
+    const el = $("ws-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function fmtSize(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(i ? 1 : 0) + " " + u[i];
+  }
+
+  function renderItem(w) {
+    const row = document.createElement("div");
+    row.className = "ws-item";
+    const name = document.createElement("span");
+    name.className = "ws-name";
+    name.textContent = w.name;
+    row.appendChild(name);
+    if (w.is_default) {
+      const tag = document.createElement("span");
+      tag.className = "ws-default-tag";
+      tag.textContent = "default";
+      row.appendChild(tag);
+    }
+    if (w.is_git_repo) {
+      const gt = document.createElement("span");
+      gt.className = "ws-git-tag";
+      gt.textContent = "git" + (w.branch ? ":" + w.branch : "");
+      row.appendChild(gt);
+    }
+    const meta = document.createElement("span");
+    meta.className = "ws-meta";
+    meta.textContent = w.file_count + " files · " + fmtSize(w.size_bytes);
+    row.appendChild(meta);
+
+    const btnSwitch = document.createElement("button");
+    btnSwitch.className = "btn ghost btn-tiny";
+    btnSwitch.textContent = "Switch";
+    btnSwitch.addEventListener("click", () => switchWs(w.name));
+    row.appendChild(btnSwitch);
+
+    const btnRename = document.createElement("button");
+    btnRename.className = "btn ghost btn-tiny";
+    btnRename.textContent = "Rename";
+    btnRename.addEventListener("click", () => renameWs(w.name));
+    row.appendChild(btnRename);
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "btn ghost btn-tiny";
+    btnDel.textContent = "Delete";
+    btnDel.addEventListener("click", () => deleteWs(w.name));
+    row.appendChild(btnDel);
+    return row;
+  }
+
+  function renderList(containerId, items) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!items || items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ws-empty";
+      empty.textContent = "No workspaces yet.";
+      el.appendChild(empty);
+      return;
+    }
+    items.forEach(w => el.appendChild(renderItem(w)));
+  }
+
+  async function load() {
+    try {
+      const [lr, rr] = await Promise.all([
+        fetch("/api/workspaces"),
+        fetch("/api/workspaces/recent"),
+      ]);
+      if (lr.ok) {
+        const body = await lr.json();
+        renderList("ws-list", body.workspaces || []);
+      }
+      if (rr.ok) {
+        const body = await rr.json();
+        renderList("ws-recent-list", body.workspaces || []);
+      }
+    } catch (e) { showStatus("Failed to load workspaces.", false); }
+  }
+
+  async function createWs() {
+    const name = $("ws-new-name").value.trim();
+    const repo = $("ws-new-repo").value.trim();
+    if (!name) { showStatus("Enter a workspace name.", false); return; }
+    try {
+      const r = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, repo: repo || null }),
+      });
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Create failed (" + r.status + ").", false);
+        return;
+      }
+      $("ws-new-name").value = "";
+      $("ws-new-repo").value = "";
+      showStatus("Workspace created.", true);
+      load();
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  async function switchWs(name) {
+    try {
+      const r = await fetch("/api/workspaces/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (r.ok) { showStatus("Switched to " + name + ".", true); load(); }
+      else { showStatus("Switch failed.", false); }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  function renameWs(oldName) {
+    const newName = prompt("Rename workspace to:", oldName);
+    if (!newName || newName.trim() === oldName) return;
+    doRename(oldName, newName.trim());
+  }
+
+  async function doRename(oldName, newName) {
+    try {
+      const r = await fetch("/api/workspaces", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_name: oldName, new_name: newName }),
+      });
+      if (r.ok) { showStatus("Renamed to " + newName + ".", true); load(); }
+      else {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Rename failed.", false);
+      }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  async function deleteWs(name) {
+    if (!confirm("Delete workspace '" + name + "'? This cannot be undone.")) return;
+    try {
+      const r = await fetch("/api/workspaces/" + encodeURIComponent(name), { method: "DELETE" });
+      if (r.ok) { showStatus("Deleted " + name + ".", true); load(); }
+      else {
+        const b = await r.json().catch(() => ({}));
+        showStatus(b.detail || "Delete failed.", false);
+      }
+    } catch (e) { showStatus("Network error.", false); }
+  }
+
+  function open() { const m = $("workspaces-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("workspaces-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-workspaces");
+    const bClose = $("workspaces-close");
+    const bCreate = $("ws-create-btn");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bCreate) bCreate.addEventListener("click", createWs);
+    const overlay = $("workspaces-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    const nameInput = $("ws-new-name");
+    if (nameInput) nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") createWs();
+    });
+  }
+
+  return { init, load, open, close };
+})();
+
+
+/* ============================================================= */
+/* v0.7.0 — Provider Manager panel controller                    */
+/* ============================================================= */
+const Providers = (() => {
+  let state = null;
+
+  function showStatus(msg, ok) {
+    const el = $("pm-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function capYes(v) {
+    return v ? '<span class="cap-yes">&#10003;</span>' : '<span class="cap-no">&#10007;</span>';
+  }
+
+  function renderCard(name, p) {
+    const card = document.createElement("div");
+    card.className = "pm-card" + (name === state.active ? " active" : "") + (p.enabled ? "" : " disabled");
+    const head = document.createElement("div");
+    head.className = "pm-card-head";
+    const nm = document.createElement("span");
+    nm.className = "pm-card-name";
+    nm.textContent = p.display_name || name;
+    head.appendChild(nm);
+    const st = document.createElement("span");
+    const hstatus = (p.health && p.health.status) || "unknown";
+    st.className = "provider-row-status " + hstatus;
+    st.textContent = hstatus;
+    head.appendChild(st);
+    if (name === state.active) {
+      const at = document.createElement("span");
+      at.className = "pm-tag";
+      at.style.background = "rgba(88,166,255,0.18)";
+      at.style.color = "#58a6ff";
+      at.textContent = "active";
+      head.appendChild(at);
+    }
+    card.appendChild(head);
+
+    const tags = document.createElement("div");
+    tags.className = "pm-card-tags";
+    if (p.requires_api_key) {
+      const t = document.createElement("span");
+      t.className = "pm-tag requires-key";
+      t.textContent = "requires API key";
+      tags.appendChild(t);
+    }
+    if (!p.enabled) {
+      const t = document.createElement("span");
+      t.className = "pm-tag";
+      t.textContent = "disabled";
+      tags.appendChild(t);
+    }
+    const cap = p.capability || {};
+    if (cap.streaming) {
+      const t = document.createElement("span"); t.className = "pm-tag"; t.textContent = "streaming";
+      tags.appendChild(t);
+    }
+    if (cap.tool_calling) {
+      const t = document.createElement("span"); t.className = "pm-tag"; t.textContent = "tools";
+      tags.appendChild(t);
+    }
+    card.appendChild(tags);
+
+    card.addEventListener("click", () => renderDetail(name));
+    return card;
+  }
+
+  function renderDetail(name) {
+    const detail = $("pm-detail");
+    if (!state || !state.providers || !state.providers[name]) {
+      detail.className = "pm-detail ws-empty";
+      detail.textContent = "Select a provider to view details.";
+      return;
+    }
+    const p = state.providers[name];
+    const cap = p.capability || {};
+    const health = p.health || {};
+    const isActive = (name === state.active);
+    detail.className = "pm-detail";
+    detail.innerHTML =
+      `<div><b>${p.display_name || name}</b> <span style="opacity:0.5;font-size:12px">(${name})</span></div>` +
+      `<div style="margin-top:4px;font-size:12px;opacity:0.8">${p.description || ""}</div>` +
+      `<div class="cap-grid" style="margin-top:8px">` +
+        `<div class="cap-item">${capYes(cap.streaming)} Streaming</div>` +
+        `<div class="cap-item">${capYes(cap.tool_calling)} Tool calling</div>` +
+        `<div class="cap-item">${capYes(cap.code_editing)} Code editing</div>` +
+        `<div class="cap-item">CTX: ${cap.context_window != null ? cap.context_window : "?"}</div>` +
+      `</div>` +
+      `<div style="margin-top:6px;font-size:12px">Health: <b>${health.status || "unknown"}</b> · ` +
+      `errors: ${health.error_count || 0} · successes: ${health.success_count || 0}` +
+      (health.avg_response_time_ms != null ? ` · avg ${health.avg_response_time_ms}ms` : "") + `</div>` +
+      `<div class="provider-actions">` +
+        (isActive ? "" : `<button class="btn small" onclick="Providers.setActive('${name}')">Set Active</button>`) +
+        (p.enabled ? `<button class="btn small ghost" onclick="Providers.toggle('${name}', false)">Disable</button>`
+                   : `<button class="btn small" onclick="Providers.toggle('${name}', true)">Enable</button>`) +
+        `<button class="btn small ghost" onclick="Providers.probe('${name}')">Health Check</button>` +
+      `</div>`;
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/providers");
+      if (!r.ok) { showStatus("Failed to load providers.", false); return; }
+      state = await r.json();
+      $("pm-active").textContent = state.active || "—";
+      const hs = (state.active_health && state.active_health.status) || "unknown";
+      const hp = $("pm-active-health");
+      hp.textContent = hs;
+      hp.className = "provider-health-pill " + hs;
+      $("pm-enabled").textContent = state.enabled ? "enabled" : "disabled";
+      const list = $("pm-list");
+      list.innerHTML = "";
+      const names = Object.keys(state.providers || {});
+      if (!names.length) {
+        const e = document.createElement("div");
+        e.className = "ws-empty";
+        e.textContent = "No providers registered.";
+        list.appendChild(e);
+        return;
+      }
+      names.forEach(n => list.appendChild(renderCard(n, state.providers[n])));
+    } catch (e) { showStatus("Network error loading providers.", false); }
+  }
+
+  async function setActive(name) {
+    try {
+      await fetch("/api/providers/active", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await load(); loadProvider();
+      showStatus("Active provider set to " + name + ".", true);
+    } catch (e) { showStatus("Failed to set active provider.", false); }
+  }
+
+  async function toggle(name, enable) {
+    try {
+      const url = "/api/providers/" + (enable ? "enable" : "disable");
+      await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await load();
+      showStatus((enable ? "Enabled " : "Disabled ") + name + ".", true);
+    } catch (e) { showStatus("Failed to toggle provider.", false); }
+  }
+
+  async function probe(name) {
+    try {
+      await fetch(`/api/providers/${name}/health`);
+      await load(); renderDetail(name);
+      showStatus("Health check complete.", true);
+    } catch (e) { showStatus("Health check failed.", false); }
+  }
+
+  function open() { const m = $("providers-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("providers-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-providers");
+    const bClose = $("providers-close");
+    const bRefresh = $("pm-refresh");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bRefresh) bRefresh.addEventListener("click", load);
+    const overlay = $("providers-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, open, close, setActive, toggle, probe };
+})();
+window.Providers = window.Providers || {};
+
+
+/* ============================================================= */
+/* v0.7.0 — Dashboard panel controller                           */
+/* ============================================================= */
+const Dashboard = (() => {
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function renderTaskList(containerId, items) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!items || !items.length) {
+      const e = document.createElement("div");
+      e.className = "ws-empty";
+      e.textContent = "No tasks.";
+      el.appendChild(e);
+      return;
+    }
+    items.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "pm-card";
+      row.innerHTML =
+        `<div class="pm-card-head">` +
+          `<span class="pm-card-name">${esc(t.task_id)}</span>` +
+          `<span class="provider-row-status ${esc(t.status)}">${esc(t.status)}</span>` +
+        `</div>` +
+        `<div style="font-size:12px;opacity:0.7;margin-top:3px">${esc(t.description)}</div>` +
+        `<div style="font-size:11px;opacity:0.5;margin-top:2px">${esc(t.created_at)}${t.branch ? " · " + esc(t.branch) : ""}</div>`;
+      el.appendChild(row);
+    });
+  }
+
+  function renderHealth(containerId, components) {
+    const el = $(containerId);
+    if (!el) return;
+    el.innerHTML = "";
+    if (!components || !components.length) {
+      const e = document.createElement("div");
+      e.className = "ws-empty";
+      e.textContent = "No health data.";
+      el.appendChild(e);
+      return;
+    }
+    components.forEach((c) => {
+      const row = document.createElement("div");
+      row.className = "pm-card";
+      row.innerHTML =
+        `<div class="pm-card-head">` +
+          `<span class="pm-card-name">${esc(c.name)}</span>` +
+          `<span class="provider-row-status ${esc(c.status)}">${esc(c.status)}</span>` +
+        `</div>` +
+        (c.detail ? `<div style="font-size:12px;opacity:0.7;margin-top:3px">${esc(c.detail)}</div>` : "");
+      el.appendChild(row);
+    });
+  }
+
+  async function load() {
+    try {
+      const r = await fetch("/api/dashboard");
+      if (!r.ok) return;
+      const d = await r.json();
+      $("dash-agent").textContent = d.agent_status || "idle";
+      $("dash-multiagent").textContent = d.multi_agent_enabled ? "on" : "off";
+      renderTaskList("dash-active-tasks", d.active_tasks);
+      renderTaskList("dash-recent-tasks", d.recent_tasks);
+      const ws = d.workspace_status || {};
+      $("dash-workspace").innerHTML =
+        `Workspaces: <b>${ws.count || 0}</b>` +
+        (ws.default ? ` · default: <b>${esc(ws.default)}</b>` : "") +
+        (ws.names && ws.names.length ? `<br><span style="opacity:0.6;font-size:12px">${esc(ws.names.join(", "))}</span>` : "");
+      const git = d.git_status || {};
+      $("dash-git").innerHTML = git.configured
+        ? `Repository: <b>${esc(git.full_name)}</b> · branch: <b>${esc(git.default_branch)}</b>${git.private ? " (private)" : ""}`
+        : "No repository configured.";
+      const prov = d.provider_status || {};
+      $("dash-provider").innerHTML = prov.configured
+        ? `Provider: <b>${esc(prov.provider)}</b> · model: <b>${esc(prov.model)}</b> · streaming: ${prov.streaming_supported ? "yes" : "no"}`
+        : "No AI provider configured.";
+      renderHealth("dash-health", d.system_health || []);
+      // System status from health endpoint
+      try {
+        const sr = await fetch("/api/system/health");
+        if (sr.ok) {
+          const sh = await sr.json();
+          $("dash-sysstatus").textContent = sh.status || "—";
+          $("dash-version").textContent = sh.version || "0.7.0";
+          renderHealth("dash-health", sh.components || []);
+        }
+      } catch {}
+    } catch (e) {}
+  }
+
+  function open() { const m = $("dashboard-modal"); if (m) m.hidden = false; load(); }
+  function close() { const m = $("dashboard-modal"); if (m) m.hidden = true; }
+
+  function init() {
+    const bOpen = $("btn-dashboard");
+    const bClose = $("dashboard-close");
+    const bRefresh = $("dash-refresh");
+    if (bOpen) bOpen.addEventListener("click", open);
+    if (bClose) bClose.addEventListener("click", close);
+    if (bRefresh) bRefresh.addEventListener("click", load);
+    const overlay = $("dashboard-modal");
+    if (overlay) overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  return { init, load, open, close };
+})();
+
+
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)
 let evtSource = null;     // SSE fallback connection
@@ -890,6 +1703,12 @@ $("btn-refresh-tree").addEventListener("click", (e) => {
   toast("Repository tree refreshed", "ok");
 });
 
+$("btn-refresh-providers").addEventListener("click", (e) => {
+  e.stopPropagation();
+  loadProviders();
+  toast("Providers refreshed", "ok");
+});
+
 // ── Mobile Tabs Switching ────────────────────────────────────────────────
 function switchMobileTab(targetTabId) {
   // Toggle tab buttons
@@ -954,16 +1773,157 @@ function initMobileTabState() {
 window.addEventListener("resize", initMobileTabState);
 
 // ── Global registrations for HTML onclick events ────────────────────────
+// Provider management panel (v0.6.0)
+let _providerState = null;
+
+async function loadProviders() {
+  const list = $("provider-list");
+  const activeName = $("provider-active-name");
+  const activeHealth = $("provider-active-health");
+  if (!list) return;
+  try {
+    const r = await fetch("/api/providers");
+    if (!r.ok) { list.innerHTML = '<li class="empty-state">Provider info unavailable.</li>'; return; }
+    const data = await r.json();
+    _providerState = data;
+    activeName.textContent = data.active || "local";
+    const hs = (data.active_health && data.active_health.status) || "unknown";
+    activeHealth.textContent = hs;
+    activeHealth.className = "provider-health-pill " + hs;
+    const names = Object.keys(data.providers || {});
+    if (!names.length) { list.innerHTML = '<li class="empty-state">No providers registered.</li>'; return; }
+    list.innerHTML = "";
+    names.forEach((name) => {
+      const p = data.providers[name];
+      const li = document.createElement("li");
+      if (name === data.active) li.classList.add("active");
+      if (!p.enabled) li.classList.add("disabled");
+      const status = (p.health && p.health.status) || "unknown";
+      li.innerHTML = `<span class="provider-row-name">${p.display_name || name}</span>` +
+                     `<span class="provider-row-status ${status}">${status}</span>`;
+      li.onclick = () => showProviderDetail(name);
+      list.appendChild(li);
+    });
+  } catch (e) {
+    list.innerHTML = '<li class="empty-state">Provider info unavailable.</li>';
+  }
+}
+
+function showProviderDetail(name) {
+  const detail = $("provider-detail");
+  if (!_providerState || !_providerState.providers || !_providerState.providers[name]) return;
+  const p = _providerState.providers[name];
+  const cap = p.capability || {};
+  const health = p.health || {};
+  const capYes = (v) => v ? '<span class="cap-yes">&#10003;</span>' : '<span class="cap-no">&#10007;</span>';
+  const isActive = (name === _providerState.active);
+  detail.className = "provider-detail";
+  detail.innerHTML =
+    `<div><b>${p.display_name || name}</b></div>` +
+    `<div style="margin-top:4px">${p.description || ""}</div>` +
+    `<div class="cap-grid" style="margin-top:8px">` +
+      `<div class="cap-item">${capYes(cap.streaming)} Streaming</div>` +
+      `<div class="cap-item">${capYes(cap.tool_calling)} Tool calling</div>` +
+      `<div class="cap-item">${capYes(cap.code_editing)} Code editing</div>` +
+      `<div class="cap-item">CTX: ${cap.context_window != null ? cap.context_window : "?"}</div>` +
+    `</div>` +
+    `<div style="margin-top:8px">Health: <b>${health.status || "unknown"}</b> - ` +
+    `errors: ${health.error_count || 0} - successes: ${health.success_count || 0}` +
+    (health.avg_response_time_ms != null ? ` - avg ${health.avg_response_time_ms}ms` : "") + `</div>` +
+    `<div class="provider-actions">` +
+      (isActive ? "" : `<button class="btn small" onclick="setActiveProvider('${name}')">Set Active</button>`) +
+      (p.enabled ? `<button class="btn small ghost" onclick="toggleProvider('${name}', false)">Disable</button>`
+                 : `<button class="btn small" onclick="toggleProvider('${name}', true)">Enable</button>`) +
+      `<button class="btn small ghost" onclick="probeProvider('${name}')">Health Check</button>` +
+    `</div>`;
+}
+
+async function setActiveProvider(name) {
+  try {
+    await fetch("/api/providers/active", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    await loadProviders(); loadProvider();
+  } catch (e) {}
+}
+
+async function toggleProvider(name, enable) {
+  try {
+    const url = "/api/providers/" + (enable ? "enable" : "disable");
+    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    await loadProviders();
+  } catch (e) {}
+}
+
+async function probeProvider(name) {
+  try {
+    await fetch(`/api/providers/${name}/health`);
+    await loadProviders(); showProviderDetail(name);
+  } catch (e) {}
+}
+
 window.selectTask = selectTask;
 window.gitStage = gitStage;
 window.gitUnstage = gitUnstage;
 window.gitDiscard = gitDiscard;
 window.toggleSymbols = toggleSymbols;
 window.openFilePreview = openFilePreview;
+window.loadProviders = loadProviders;
+window.setActiveProvider = setActiveProvider;
+window.toggleProvider = toggleProvider;
+window.probeProvider = probeProvider;
+window.showProviderDetail = showProviderDetail;
 
 // ── Init ────────────────────────────────────────────────────────────────
-loadRepo();
-loadProvider();
-loadTasks();
-initMobileTabState();
-setStatus("idle", "Idle");
+// Auth-aware boot: check whether authentication is enabled. If it is and
+// we have no valid session, show the login screen and defer the rest of
+// the app init until a successful login. When auth is disabled (default),
+// everything boots immediately (backward compatible).
+Auth.init();
+Settings.init();
+Workspaces.init();
+Providers.init();
+Dashboard.init();
+
+// ── Loading / error helpers (v0.7.0 release prep) ────────────────────────────
+const UI = (() => {
+  function showLoading(msg) {
+    const el = $("app-loading");
+    if (el) { el.innerHTML = '<span class="app-loading-dot"></span> ' + (msg || "Loading…"); el.hidden = false; }
+  }
+  function hideLoading() { const el = $("app-loading"); if (el) el.hidden = true; }
+  let toastTimer = null;
+  function showError(msg) {
+    const el = $("app-error-toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 5000);
+  }
+  return { showLoading, hideLoading, showError };
+})();
+window.UI = UI;
+
+async function bootApp() {
+  UI.showLoading("Connecting…");
+  const enabled = await Auth.checkStatus();
+  // After a deferred login completes, run the rest of the app init.
+  Auth.onAuthSuccessHook = () => {
+    loadRepo(); loadProvider(); loadProviders(); loadTasks();
+    initMobileTabState(); setStatus("idle", "Idle"); UI.hideLoading();
+  };
+  if (enabled && !Auth.getToken()) {
+    UI.hideLoading();
+    Auth.showLogin();
+    return; // app init deferred until login succeeds
+  }
+  Auth.renderUserMenu();
+  loadRepo();
+  loadProvider();
+  loadProviders();
+  loadTasks();
+  initMobileTabState();
+  setStatus("idle", "Idle");
+  UI.hideLoading();
+}
+
+bootApp();

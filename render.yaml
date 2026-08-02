@@ -1,0 +1,40 @@
+# ── PK Ninja Agent — Render Blueprint ───────────────────────────────────
+# Deploy to Render: https://render.com/docs/blueprint-spec
+#
+# Usage:
+#   1. Push this file to your repo
+#   2. Go to render.com → New → Blueprint
+#   3. Connect your GitHub repo (Salmanlaghari/PK-Ninja-Agent)
+#   4. Render auto-detects this file and creates the service
+#   5. Click "Apply" — deployment starts automatically
+#
+# Free tier: 750 hours/month, spins down after 15 min inactivity
+# Free subdomain: https://pk-ninja-agent.onrender.com
+# HTTPS: Automatic (Let's Encrypt)
+# Note: SQLite data resets on spin-down (free tier has no persistent disk)
+
+services:
+  - type: web
+    name: pk-ninja-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    branch: main
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: AI_PROVIDER
+        value: local
+      - key: AUTH_ENABLED
+        value: "false"
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_PATH
+        value: /app/data/pk_ninja.db
+      - key: WORKSPACE_ROOT
+        value: /app/workspaces
+    healthCheckPath: /health
+    autoDeploy: true

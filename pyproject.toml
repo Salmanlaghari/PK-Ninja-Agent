@@ -1,2 +1,18 @@
+[project]
+name = "pk-ninja-agent"
+version = "1.1.0"
+description = "PK Ninja Agent — autonomous coding agent workspace (FastAPI backend)."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sse-starlette>=2.1",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+    "psutil>=5.9",
+]
+
 [tool.vercel]
 entrypoint = "backend.main:app"
