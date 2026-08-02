@@ -1395,6 +1395,12 @@ const EVT_TITLE_MAP = {
 };
 
 function renderEvent(ev) {
+  // Ignore keepalive / control messages that the backend sends to keep the
+  // WebSocket/SSE connection alive. They have no message payload and would
+  // otherwise render as empty "ping" cards.
+  if (!ev || ev.type === "ping" || ev.type === "pong" || ev.type === "heartbeat") {
+    return;
+  }
   if (ev.type === "thinking") {
     const token = (ev.data && (ev.data.token || ev.data.text)) ||
                   (typeof ev.message === "string" ? ev.message : "");
@@ -1871,6 +1877,9 @@ function startWebSocket(taskId) {
   ws.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
+      // Skip keepalive pings and other control frames.
+      if (!ev || !ev.type || ev.type === "ping" || ev.type === "pong" ||
+          ev.type === "heartbeat") return;
       renderEvent(ev);
     } catch (err) {}
   };
@@ -1891,6 +1900,8 @@ function startSSE(taskId) {
   evtSource.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
+      if (!ev || !ev.type || ev.type === "ping" || ev.type === "pong" ||
+          ev.type === "heartbeat") return;
       renderEvent(ev);
     } catch (err) {}
   };
