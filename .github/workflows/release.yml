@@ -8,19 +8,24 @@ on:
   push:
     tags: ["v*"]
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: write
 
 jobs:
-  release:
-    name: Create Release
+  test:
+    name: Test
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,14 +44,24 @@ jobs:
           AI_PROVIDER: local
           GITHUB_TOKEN: ""
 
+  release:
+    name: Create Release
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build Docker image
-        run: |
-          docker build -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }} .
-          docker build -t ghcr.io/${{ github.repository }}:latest .
+      - name: Set Docker image name (lowercase)
+        id: docker
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -55,18 +70,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Docker image
+      - name: Build and push Docker image
         run: |
-          docker push ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
-          docker push ghcr.io/${{ github.repository }}:latest
+          IMAGE=${{ steps.docker.outputs.IMAGE }}
+          VERSION=${{ steps.version.outputs.VERSION }}
+          docker build -t ${IMAGE}:${VERSION} -t ${IMAGE}:latest .
+          docker push ${IMAGE}:${VERSION}
+          docker push ${IMAGE}:latest
 
       - name: Generate changelog
         id: changelog
         run: |
-          # Get commits since last tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           if [ -z "$PREV_TAG" ]; then
-            CHANGES=$(git log --oneline --no-merges)
+            CHANGES=$(git log --oneline --no-merges | head -20)
           else
             CHANGES=$(git log --oneline --no-merges ${PREV_TAG}..HEAD)
           fi
@@ -86,8 +103,8 @@ jobs:
 
             ### Docker
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
-            docker run -p 8000:8000 --env-file .env ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            docker pull ${{ steps.docker.outputs.IMAGE }}:${{ steps.version.outputs.VERSION }}
+            docker run -p 8000:8000 --env-file .env ${{ steps.docker.outputs.IMAGE }}:${{ steps.version.outputs.VERSION }}
             ```
 
             ### Quick Start
@@ -97,6 +114,4 @@ jobs:
             cp .env.example .env
             docker compose up -d
             ```
-          files: |
-            CHANGELOG.md
           generate_release_notes: true
