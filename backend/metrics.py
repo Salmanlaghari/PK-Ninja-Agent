@@ -93,7 +93,7 @@ def setup_metrics(app: Any) -> None:
     from fastapi.responses import PlainTextResponse
 
     APP_INFO.info({
-        "version": "0.9.0",
+        "version": "1.0.0",
         "name": "pk-ninja-agent",
     })
 

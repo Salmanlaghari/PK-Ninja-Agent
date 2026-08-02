@@ -2,6 +2,39 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — Stable Release
+
+The first official stable release of PK Ninja Agent. This release focuses on stability, quality, performance, and comprehensive documentation. No new features — only hardening, cleanup, and polish of the existing production-ready codebase.
+
+### Changed
+- Version bumped from 0.9.0 to 1.0.0.
+- Removed junk `None` file (accidentally committed SQLite test artifact).
+- Fixed flaky `test_validate_workspace_symlink_escape` (proper directory setup in test isolation).
+- Extracted duplicate `_rt_for()` function from `terminal_agent.py` and `testing_agent.py` into shared `get_runtime_for_ctx()` in `agents/base.py`.
+- Removed unused imports from 12 backend files (`agent.py`, `ai_provider.py`, `config.py`, `context_engine.py`, `exporter.py`, `indexing.py`, `main.py`, `metrics.py`, `recovery.py`, `scheduler.py`, `security.py`, `terminal.py`, `workspace.py`).
+- Cleaned up `main.py` imports: removed 7 unused imports (`TaskRuntime`, `AuthService`, `QueueStatus`, `BackgroundWorker`, `psutil_available`, `WorkspaceValidationResult`, `check_extra_blocked`).
+
+### Added
+- `SECURITY.md` — comprehensive security policy and architecture documentation.
+- `API.md` — full API reference covering all endpoints.
+
+### Fixed
+- Test isolation issue in security hardening tests.
+- All tests now pass consistently (543/543).
+
+### Security
+- Verified no hardcoded secrets in codebase.
+- Verified no `eval`/`exec` usage.
+- Verified all subprocess usage is sandboxed.
+- Verified path traversal protection across all file operations.
+- Verified command sandbox (allowlist, blocklist, timeout, process group isolation).
+
+### Tests
+- **543 tests, 0 failures**.
+- All tests pass consistently in full-suite runs.
+
+---
+
 ## [0.9.0] — Production & Deployment
 
 The release that makes PK Ninja Agent production-ready with containerization, CI/CD, structured logging, monitoring, backup/recovery, security auditing, and graceful shutdown. Every addition is backward compatible — the application behaves exactly as v0.8.0 with default settings.

@@ -306,7 +306,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="0.9.0")
+app = FastAPI(title="PK Ninja Agent", version="1.0.0")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
@@ -711,7 +711,7 @@ async def _startup() -> None:
                 log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
-    log.info("PK Ninja Agent v0.9.0 started (env=%s). DB at %s",
+    log.info("PK Ninja Agent v1.0.0 started (env=%s). DB at %s",
              env, s.db_path)
     # v0.8.0 — Autonomous Execution Engine: initialise the scheduler + worker
     # when opted in. When disabled (default), the original fire-and-forget
@@ -740,7 +740,7 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.9.0"}
+    return {"status": "ok", "version": "1.0.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

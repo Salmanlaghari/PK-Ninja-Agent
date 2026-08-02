@@ -4,17 +4,17 @@ This document tracks the planned evolution of PK Ninja Agent from the current be
 
 ---
 
-## Current State: v0.9.0 — Production & Deployment
+## Current State: v1.0.0 — Stable Release
 
-PK Ninja Agent v0.9.0 is a production-ready autonomous coding platform. It adds Docker containerization, CI/CD pipelines, structured JSON logging, Prometheus monitoring, database backup/recovery, graceful shutdown, and security auditing tools. The test suite stands at **543 passing tests**, all backward compatible with v0.8.0.
+PK Ninja Agent v1.0.0 is the first official stable release. It is a production-ready, self-hostable autonomous coding agent with 543 passing tests, comprehensive security, Docker containerization, CI/CD, structured logging, monitoring, backup/recovery, and full documentation.
 
-Every production feature is additive — the application behaves exactly as v0.8.0 with default settings. Docker, CI/CD, and monitoring are opt-in layers that don't affect existing deployments.
+The codebase is clean: dead code removed, duplicate logic extracted, unused imports cleaned, flaky tests fixed. No experimental features — only proven, tested functionality.
 
 ---
 
-## v1.0.0 — Stable Release
+## v1.1.0+ — Future Directions
 
-The goal of v1.0.0 is to ship a stable, production-ready autonomous coding agent that small teams can self-host with confidence.
+Ideas and directions for post-1.0 development. These are exploratory and not committed.
 
 ### Autonomous execution hardening
 - **Worker persistence.** The background worker is in-memory (daemon threads). v1.0.0 should persist the worker queue to SQLite so in-flight tasks survive a process restart and are picked up by the recovery system automatically.
