@@ -131,6 +131,9 @@ class TestJulesProviderInit:
         monkeypatch.delenv("JULES_API_KEY", raising=False)
         monkeypatch.delenv("AI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # v1.2.0: also clear the built-in default credential so this test
+        # still asserts the "absolutely no key" behaviour.
+        monkeypatch.setenv("BUILTIN_AI_API_KEY", "")
         get_settings.cache_clear()
         with pytest.raises(AIError, match="JULES_API_KEY"):
             JulesProvider(get_settings())
@@ -527,6 +530,8 @@ class TestJulesAdapter:
         monkeypatch.delenv("JULES_API_KEY", raising=False)
         monkeypatch.delenv("AI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # v1.2.0: also clear the built-in default credential.
+        monkeypatch.setenv("BUILTIN_AI_API_KEY", "")
         get_settings.cache_clear()
         reset_manager()
         adapter = JulesAdapter(get_settings())
@@ -577,6 +582,8 @@ class TestJulesManagerIntegration:
         monkeypatch.delenv("JULES_API_KEY", raising=False)
         monkeypatch.delenv("AI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # v1.2.0: also clear the built-in default credential.
+        monkeypatch.setenv("BUILTIN_AI_API_KEY", "")
         get_settings.cache_clear()
         reset_manager()
         m = ProviderManager(get_settings())
@@ -617,6 +624,9 @@ class TestJulesFactory:
         monkeypatch.delenv("JULES_API_KEY", raising=False)
         monkeypatch.delenv("AI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # v1.2.0: also clear the built-in default credential so the factory
+        # genuinely has no key and falls back to LocalProvider.
+        monkeypatch.setenv("BUILTIN_AI_API_KEY", "")
         get_settings.cache_clear()
         p = get_provider()
         assert isinstance(p, LocalProvider)

@@ -1091,8 +1091,9 @@ class _Cancelled(Exception):
 
 # ── Public API used by main.py ──────────────────────────────────────────
 def start_task(task_id: str, description: str,
-               repo_full: Optional[str] = None) -> TaskRuntime:
-    agent = Agent(task_id, description, repo_full=repo_full)
+               repo_full: Optional[str] = None,
+               settings: Optional[Settings] = None) -> TaskRuntime:
+    agent = Agent(task_id, description, repo_full=repo_full, settings=settings)
     t = threading.Thread(target=agent.run, name=f"agent-{task_id}", daemon=True)
     agent.rt.thread = t
     t.start()

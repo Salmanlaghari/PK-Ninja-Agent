@@ -1121,7 +1121,7 @@ header {
 /* v0.7.0 — Settings modal                                        */
 /* ============================================================= */
 .header-btn { margin-left: 4px; }
-.settings-box { max-width: 560px; }
+.settings-box { max-width: 620px; }
 .settings-body { max-height: 70vh; overflow-y: auto; }
 .settings-group { margin-bottom: 18px; }
 .settings-label {
@@ -1266,3 +1266,145 @@ header {
 .pm-detail .cap-yes { color: #3fb950; }
 .pm-detail .cap-no { color: #f85149; }
 .pm-detail .provider-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ============================================================= */
+/* v1.2.0 — Settings: Provider cards, API key & GitHub connect     */
+/* ============================================================= */
+
+/* Provider cards grid (replaces single dropdown) */
+.provider-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.provider-cards-empty {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 12px;
+  text-align: center;
+}
+.provider-card {
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(0,0,0,0.12);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.provider-card:hover {
+  border-color: var(--accent);
+  background: rgba(88,166,255,0.06);
+}
+.provider-card.selected {
+  border-color: var(--accent);
+  background: rgba(88,166,255,0.12);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+.provider-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.provider-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.pm-tag.active-tag {
+  background: rgba(88,166,255,0.18);
+  color: #58a6ff;
+}
+.provider-card-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.provider-card-keystatus {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.apikey-link {
+  display: inline-block;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.apikey-link:hover { text-decoration: underline; }
+
+/* API key / GitHub status row */
+.apikey-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.apikey-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.apikey-dot.ok { background: var(--ok, #3fb950); box-shadow: 0 0 6px rgba(63,185,80,0.5); }
+.apikey-dot.none { background: var(--text-faint, #6e7681); }
+.apikey-dot.builtin {
+  background: #d29922;
+  box-shadow: 0 0 6px rgba(210,153,34,0.5);
+}
+.apikey-status-text { color: var(--text); font-weight: 600; }
+.apikey-masked {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: rgba(0,0,0,0.2);
+  padding: 1px 7px;
+  border-radius: 6px;
+}
+.apikey-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.apikey-input-row .settings-input {
+  flex: 1;
+  min-width: 160px;
+}
+.apikey-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  margin-top: 7px;
+}
+.apikey-hint b { color: var(--text-dim); }
+.gh-repo-row { margin-top: 6px; }
+.gh-repo-row .settings-input.settings-inline { max-width: 140px; }
+.gh-avatar {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+/* Header provider badge — built-in key variant */
+.provider-badge.builtin {
+  color: #d29922;
+  border-color: rgba(210,153,34,0.3);
+}
+.provider-badge.builtin .spark { background: #d29922; }
+
+/* Responsive: single column provider cards on narrow screens */
+@media (max-width: 560px) {
+  .provider-cards { grid-template-columns: 1fr; }
+  .apikey-input-row .settings-input { min-width: 100%; }
+}
