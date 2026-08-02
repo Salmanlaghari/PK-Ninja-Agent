@@ -314,7 +314,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="1.2.0")
+app = FastAPI(title="PK Ninja Agent", version="1.3.0")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
@@ -578,11 +578,22 @@ async def github_status(user: User = Depends(current_user)) -> dict:
     avatar = None
     repo = None
     if connected:
-        # We don't re-call the GitHub API on every status check (rate limits).
-        # The login/avatar are surfaced at connect time and stored transiently
-        # in the session; here we just report the boolean + configured repo.
-        # If the server env has GITHUB_OWNER/REPO we surface it.
-        repo = settings.github_repo_full()
+        # v1.3.0: Read the persisted login/avatar/owner/repo from the
+        # settings store (saved at connect time) instead of making a live
+        # GitHub API call on every status check (avoids rate-limit issues).
+        try:
+            from settings_store import get_settings_for_user
+            prefs = await get_settings_for_user(settings, user)
+            login = prefs.get("github_login") or None
+            avatar = prefs.get("github_avatar") or None
+            g_owner = prefs.get("github_owner") or ""
+            g_repo = prefs.get("github_repo") or ""
+            if g_owner and g_repo:
+                repo = f"{g_owner}/{g_repo}"
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not read github prefs: %s", exc)
+        if not repo:
+            repo = settings.github_repo_full()
     configured_repo = settings.github_repo_full()
     return GitHubStatusOut(
         connected=connected,
@@ -601,8 +612,9 @@ async def github_connect(body: GitHubConnectRequest,
     The token is verified against GitHub's ``/user`` endpoint (so we know it
     is valid and can read the user's identity), then stored encrypted in the
     secret store. The plaintext is never returned. When ``owner``/``repo``
-    are provided they are used to bind the connection; otherwise we fall back
-    to the server-configured repo.
+    are provided they are persisted to the user settings store so the agent
+    automatically picks them up on the next task; otherwise we fall back to
+    the server-configured repo.
     """
     settings = get_settings()
     svc = get_auth_service(settings)
@@ -614,19 +626,30 @@ async def github_connect(body: GitHubConnectRequest,
         await store_secret(settings, user, "github_token", body.github_token.strip())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # Determine the repo this connection is bound to.
-    repo = None
-    if body.owner and body.repo:
-        repo = f"{body.owner.strip()}/{body.repo.strip()}"
-    else:
-        repo = settings.github_repo_full()
+    # v1.3.0: Persist the GitHub login + owner/repo to the settings store
+    # so build_user_settings() picks them up and the agent can auto-clone.
+    login = info.get("login", "")
+    avatar = info.get("avatar_url", "")
+    owner = (body.owner or "").strip() or login or ""
+    repo_name = (body.repo or "").strip()
+    repo = f"{owner}/{repo_name}" if owner and repo_name else settings.github_repo_full()
+    try:
+        from settings_store import update_settings_for_user
+        prefs_update: dict = {"github_login": login, "github_avatar": avatar}
+        if owner:
+            prefs_update["github_owner"] = owner
+        if repo_name:
+            prefs_update["github_repo"] = repo_name
+        await update_settings_for_user(settings, user, prefs_update)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not persist github prefs: %s", exc)
     log.info("github connected for user %s (login=%s, repo=%s)",
-             _user_log_id(user), info.get("login"), repo)
+             _user_log_id(user), login, repo)
     return GitHubConnectOut(
         connected=True,
-        login=info.get("login"),
-        display_name=info.get("name") or info.get("login"),
-        avatar_url=info.get("avatar_url"),
+        login=login,
+        display_name=info.get("name") or login,
+        avatar_url=avatar,
         repo=repo,
         scopes=svc._github_scopes(body.github_token.strip(), info),
     ).model_dump()
@@ -637,7 +660,145 @@ async def github_disconnect(user: User = Depends(current_user)) -> dict:
     """Remove the stored GitHub token (disconnect)."""
     settings = get_settings()
     deleted = await delete_secret(settings, user, "github_token")
+    # v1.3.0: also clear the persisted github prefs.
+    try:
+        from settings_store import update_settings_for_user
+        await update_settings_for_user(settings, user, {
+            "github_login": "", "github_avatar": "",
+            "github_owner": "", "github_repo": "",
+        })
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": deleted, "connected": False}
+
+
+# ── GitHub exploration endpoints (v1.3.0) ───────────────────────────
+# These let the frontend (and the agent) query GitHub directly via the
+# stored token. They use the ``gh`` CLI which reads GITHUB_TOKEN from env.
+
+@app.get("/api/github/repos")
+async def github_list_repos(user: User = Depends(current_user)) -> dict:
+    """List the authenticated user's GitHub repositories."""
+    settings = get_settings()
+    # Inject the user's stored token into env so gh CLI can use it.
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:  # noqa: BLE001
+        user_settings = settings
+    import os
+    token = getattr(user_settings, "github_token", "") or ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail="GitHub not connected. Add a token in Settings first.")
+    os.environ["GITHUB_TOKEN"] = token
+    os.environ["GH_TOKEN"] = token
+    from github import list_user_repos, GitHubError
+    try:
+        repos = list_user_repos(user_settings, limit=30)
+        return {"repos": repos, "count": len(repos)}
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/github/repos/{owner}/{repo}/issues")
+async def github_list_issues(owner: str, repo: str,
+                             state: str = "open",
+                             limit: int = 20,
+                             user: User = Depends(current_user)) -> dict:
+    """List issues for a specific repository."""
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:  # noqa: BLE001
+        user_settings = settings
+    import os
+    token = getattr(user_settings, "github_token", "") or ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail="GitHub not connected. Add a token in Settings first.")
+    os.environ["GITHUB_TOKEN"] = token
+    os.environ["GH_TOKEN"] = token
+    from github import list_repo_issues, GitHubError
+    try:
+        issues = list_repo_issues(owner, repo, state=state, limit=limit)
+        return {"issues": issues, "count": len(issues)}
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/github/repos/{owner}/{repo}/prs")
+async def github_list_prs(owner: str, repo: str,
+                          state: str = "open",
+                          limit: int = 20,
+                          user: User = Depends(current_user)) -> dict:
+    """List pull requests for a specific repository."""
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:  # noqa: BLE001
+        user_settings = settings
+    import os
+    token = getattr(user_settings, "github_token", "") or ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail="GitHub not connected. Add a token in Settings first.")
+    os.environ["GITHUB_TOKEN"] = token
+    os.environ["GH_TOKEN"] = token
+    from github import list_repo_prs, GitHubError
+    try:
+        prs = list_repo_prs(owner, repo, state=state, limit=limit)
+        return {"prs": prs, "count": len(prs)}
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/github/repos/{owner}/{repo}/branches")
+async def github_list_branches(owner: str, repo: str,
+                               limit: int = 30,
+                               user: User = Depends(current_user)) -> dict:
+    """List branches for a specific repository."""
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:  # noqa: BLE001
+        user_settings = settings
+    import os
+    token = getattr(user_settings, "github_token", "") or ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail="GitHub not connected. Add a token in Settings first.")
+    os.environ["GITHUB_TOKEN"] = token
+    os.environ["GH_TOKEN"] = token
+    from github import list_repo_branches, GitHubError
+    try:
+        branches = list_repo_branches(owner, repo, limit=limit)
+        return {"branches": branches, "count": len(branches)}
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/github/repos/{owner}/{repo}")
+async def github_repo_details(owner: str, repo: str,
+                              user: User = Depends(current_user)) -> dict:
+    """Get detailed info about a specific repository."""
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:  # noqa: BLE001
+        user_settings = settings
+    import os
+    token = getattr(user_settings, "github_token", "") or ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail="GitHub not connected. Add a token in Settings first.")
+    os.environ["GITHUB_TOKEN"] = token
+    os.environ["GH_TOKEN"] = token
+    from github import get_repo_details, GitHubError
+    try:
+        info = get_repo_details(owner, repo)
+        return {"repo_info": info}
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 # ── Workspace Manager routes (v0.7.0) ────────────────────────────────────────
@@ -920,7 +1081,7 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "1.2.0"}
+    return {"status": "ok", "version": "1.3.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

@@ -420,6 +420,11 @@
           </div>
           <p class="login-hint">Connect your GitHub account so the agent can clone, commit, push, and open PRs. The token is verified against the GitHub API and stored encrypted — never echoed back.</p>
           <a class="apikey-link" href="https://github.com/settings/tokens/new?description=PK%20Ninja%20Agent&scopes=repo,workflow" target="_blank" rel="noopener">Create a GitHub token →</a>
+          <div id="gh-repo-display" class="gh-repo-display" hidden></div>
+          <div class="settings-row" style="margin-top: 8px;">
+            <button id="gh-load-repos" class="btn ghost btn-tiny">📂 Load my repos</button>
+          </div>
+          <div id="gh-repo-list" class="gh-repo-list"></div>
           <div id="gh-status" class="settings-status" hidden></div>
         </div>
 

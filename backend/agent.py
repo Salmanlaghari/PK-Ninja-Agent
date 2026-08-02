@@ -433,6 +433,171 @@ class Agent:
             raise _Cancelled("Task cancelled by user.")
         return False
 
+    # ── GitHub exploration task handling (v1.3.0) ─────────────────────
+    def _handle_github_exploration_task(self, rt: TaskRuntime, ws: Workspace) -> bool:
+        """Detect GitHub exploration tasks and handle them directly.
+
+        When the user asks things like "show me my repo list", "list my
+        issues", "show open PRs", we run the GitHub API tools immediately
+        and emit the results as events. Returns True if the task was
+        handled (so the caller can skip the normal AI planning loop).
+
+        This works with ANY provider (including the offline local provider)
+        because it doesn't rely on AI tool-selection — it pattern-matches
+        the task description and calls the GitHub API via the ``gh`` CLI.
+        """
+        task_l = self.description.lower().strip()
+
+        # ── Detect "show/list my repos" ──
+        repo_list_patterns = [
+            "show me my repo", "show my repo", "list my repo",
+            "my repo list", "list repos", "show repos",
+            "show me repos", "list repositories", "show repositories",
+            "my repositories", "show me my repositories",
+            "repo list", "repos list",
+        ]
+        if any(p in task_l for p in repo_list_patterns):
+            self.emit(EventType.info,
+                      "Fetching your GitHub repository list...")
+            result = self._run_local_tool("github_repos",
+                                          {"limit": 30}, ws, rt)
+            if result.get("success"):
+                repos = result.get("repos", [])
+                self.emit(EventType.info,
+                          f"Found {len(repos)} repositories.",
+                          repos=repos, count=len(repos))
+                # Emit each repo as a structured event for the frontend.
+                for r in repos:
+                    self.emit(EventType.info,
+                              f"  • {r['full_name']}"
+                              f"{' (private)' if r['private'] else ''}"
+                              f" — {r.get('description', '')[:80]}",
+                              repo=r)
+                self.emit(EventType.completed,
+                          f"Listed {len(repos)} GitHub repositories.",
+                          repos=repos, status="success")
+            else:
+                err = result.get("error", "Unknown error")
+                self.emit(EventType.error,
+                          f"Failed to list repositories: {err}")
+                self.emit(EventType.error,
+                          f"GitHub error: {err}. Make sure you have "
+                          "connected your GitHub account in Settings.",
+                          status="failed")
+            return True
+
+        # ── Detect "list/show issues" ──
+        issue_patterns = [
+            "list issues", "show issues", "list open issues",
+            "show open issues", "list all issues", "show all issues",
+            "issues list", "my issues", "open issues",
+        ]
+        if any(p in task_l for p in issue_patterns):
+            owner = self.settings.github_owner or ""
+            repo = self.settings.github_repo or ""
+            self.emit(EventType.info,
+                      f"Fetching issues for {owner}/{repo}..."
+                      if owner and repo
+                      else "Fetching issues (need a connected repo)...")
+            result = self._run_local_tool("github_issues",
+                                          {"owner": owner, "repo": repo,
+                                           "state": "open", "limit": 20},
+                                          ws, rt)
+            if result.get("success"):
+                issues = result.get("issues", [])
+                self.emit(EventType.info,
+                          f"Found {len(issues)} open issues.",
+                          issues=issues, count=len(issues))
+                for iss in issues:
+                    self.emit(EventType.info,
+                              f"  #{iss['number']} {iss['title']}"
+                              f" (by {iss.get('author', '')})",
+                              issue=iss)
+                self.emit(EventType.completed,
+                          f"Listed {len(issues)} issues.",
+                          issues=issues, status="success")
+            else:
+                err = result.get("error", "Unknown error")
+                self.emit(EventType.error,
+                          f"Failed to list issues: {err}")
+            return True
+
+        # ── Detect "list/show PRs" ──
+        pr_patterns = [
+            "list prs", "show prs", "list pull requests",
+            "show pull requests", "list open prs", "show open prs",
+            "list pr", "show pr", "pull requests list", "prs list",
+            "my prs", "open prs",
+        ]
+        if any(p in task_l for p in pr_patterns):
+            owner = self.settings.github_owner or ""
+            repo = self.settings.github_repo or ""
+            self.emit(EventType.info,
+                      f"Fetching pull requests for {owner}/{repo}..."
+                      if owner and repo
+                      else "Fetching PRs (need a connected repo)...")
+            result = self._run_local_tool("github_prs",
+                                          {"owner": owner, "repo": repo,
+                                           "state": "open", "limit": 20},
+                                          ws, rt)
+            if result.get("success"):
+                prs = result.get("prs", [])
+                self.emit(EventType.info,
+                          f"Found {len(prs)} open pull requests.",
+                          prs=prs, count=len(prs))
+                for pr in prs:
+                    draft_tag = " (draft)" if pr.get("is_draft") else ""
+                    self.emit(EventType.info,
+                              f"  #{pr['number']} {pr['title']}"
+                              f" ({pr.get('head_branch', '')}"
+                              f" → {pr.get('base_branch', '')}){draft_tag}",
+                              pr=pr)
+                self.emit(EventType.completed,
+                          f"Listed {len(prs)} pull requests.",
+                          prs=prs, status="success")
+            else:
+                err = result.get("error", "Unknown error")
+                self.emit(EventType.error,
+                          f"Failed to list PRs: {err}")
+            return True
+
+        # ── Detect "list/show branches" ──
+        branch_patterns = [
+            "list branches", "show branches", "list all branches",
+            "show all branches", "branches list", "my branches",
+        ]
+        if any(p in task_l for p in branch_patterns):
+            owner = self.settings.github_owner or ""
+            repo = self.settings.github_repo or ""
+            self.emit(EventType.info,
+                      f"Fetching branches for {owner}/{repo}..."
+                      if owner and repo
+                      else "Fetching branches (need a connected repo)...")
+            result = self._run_local_tool("github_branches",
+                                          {"owner": owner, "repo": repo,
+                                           "limit": 30},
+                                          ws, rt)
+            if result.get("success"):
+                branches = result.get("branches", [])
+                self.emit(EventType.info,
+                          f"Found {len(branches)} branches.",
+                          branches=branches, count=len(branches))
+                for br in branches:
+                    prot = " (protected)" if br.get("protected") else ""
+                    self.emit(EventType.info,
+                              f"  • {br['name']}{prot}",
+                              branch=br)
+                self.emit(EventType.completed,
+                          f"Listed {len(branches)} branches.",
+                          branches=branches, status="success")
+            else:
+                err = result.get("error", "Unknown error")
+                self.emit(EventType.error,
+                          f"Failed to list branches: {err}")
+            return True
+
+        return False
+
     def _loop(self, rt: TaskRuntime) -> None:
         # Load any existing persistent memory
         self._load_memory()
@@ -513,6 +678,14 @@ class Agent:
 
         # 2) UNDERSTAND & RELEVANCY SELECTION (Repository Context Engine)
         self.emit(EventType.analyzing, "Understanding the task and repository.")
+
+        # v1.3.0: GitHub exploration tasks — detect early and handle directly.
+        # When the user asks "show me my repo list", "list issues", "list PRs",
+        # etc., we run the GitHub API tools immediately and emit the results
+        # as events. This works with ANY provider (including local) because
+        # it doesn't require AI tool-selection — it's pattern-matched.
+        if self._handle_github_exploration_task(rt, ws):
+            return
 
         # Hybrid file context detection (candidates filtered using index keywords, then AI select)
         from context_engine import find_candidate_files, ai_select_relevant_files
@@ -807,7 +980,14 @@ class Agent:
                     "- run_command(command: str) -- terminal command execution\n"
                     "- indexing() -- reindex workspace\n"
                     "- testing() -- run repository verification command\n"
+                    "- github_repos(limit: int) -- list the authenticated user's GitHub repositories\n"
+                    "- github_issues(owner: str, repo: str, state: str, limit: int) -- list issues for a repo\n"
+                    "- github_prs(owner: str, repo: str, state: str, limit: int) -- list pull requests for a repo\n"
+                    "- github_repo_info(owner: str, repo: str) -- get detailed info about a repo\n"
+                    "- github_branches(owner: str, repo: str, limit: int) -- list branches for a repo\n"
                     "- finish_step(summary: str)\n\n"
+                    "When the user asks to see their repos, list issues, list PRs, or get repo info, use the github_* tools. "
+                    "If owner/repo are not specified in args, the connected GitHub repo will be used automatically.\n"
                     "Return a JSON object with keys 'tool' (string name of the tool) and 'args' (dictionary of tool arguments). "
                     "Return ONLY valid JSON."
                 )
@@ -920,6 +1100,64 @@ class Agent:
                 return {"success": True, "message": "No verification command found"}
             res = run_command(cmd, ws, rt=rt)
             return {"success": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
+        elif name == "github_repos":
+            # v1.3.0: List the authenticated user's repositories.
+            from github import list_user_repos, GitHubError
+            try:
+                repos = list_user_repos(self.settings, limit=args.get("limit", 30))
+                return {"success": True, "repos": repos, "count": len(repos)}
+            except GitHubError as exc:
+                return {"success": False, "error": str(exc)}
+        elif name == "github_issues":
+            # v1.3.0: List issues for a repo.
+            from github import list_repo_issues, GitHubError
+            owner = args.get("owner") or self.settings.github_owner or ""
+            repo = args.get("repo") or self.settings.github_repo or ""
+            if not owner or not repo:
+                return {"success": False, "error": "owner and repo required (connect GitHub first)"}
+            try:
+                issues = list_repo_issues(owner, repo, state=args.get("state", "open"),
+                                          limit=args.get("limit", 20))
+                return {"success": True, "issues": issues, "count": len(issues)}
+            except GitHubError as exc:
+                return {"success": False, "error": str(exc)}
+        elif name == "github_prs":
+            # v1.3.0: List pull requests for a repo.
+            from github import list_repo_prs, GitHubError
+            owner = args.get("owner") or self.settings.github_owner or ""
+            repo = args.get("repo") or self.settings.github_repo or ""
+            if not owner or not repo:
+                return {"success": False, "error": "owner and repo required (connect GitHub first)"}
+            try:
+                prs = list_repo_prs(owner, repo, state=args.get("state", "open"),
+                                    limit=args.get("limit", 20))
+                return {"success": True, "prs": prs, "count": len(prs)}
+            except GitHubError as exc:
+                return {"success": False, "error": str(exc)}
+        elif name == "github_repo_info":
+            # v1.3.0: Get detailed info about a repo.
+            from github import get_repo_details, GitHubError
+            owner = args.get("owner") or self.settings.github_owner or ""
+            repo = args.get("repo") or self.settings.github_repo or ""
+            if not owner or not repo:
+                return {"success": False, "error": "owner and repo required (connect GitHub first)"}
+            try:
+                info = get_repo_details(owner, repo)
+                return {"success": True, "repo_info": info}
+            except GitHubError as exc:
+                return {"success": False, "error": str(exc)}
+        elif name == "github_branches":
+            # v1.3.0: List branches for a repo.
+            from github import list_repo_branches, GitHubError
+            owner = args.get("owner") or self.settings.github_owner or ""
+            repo = args.get("repo") or self.settings.github_repo or ""
+            if not owner or not repo:
+                return {"success": False, "error": "owner and repo required (connect GitHub first)"}
+            try:
+                branches = list_repo_branches(owner, repo, limit=args.get("limit", 30))
+                return {"success": True, "branches": branches, "count": len(branches)}
+            except GitHubError as exc:
+                return {"success": False, "error": str(exc)}
         else:
             raise ValueError(f"Unknown tool: {name}")
 

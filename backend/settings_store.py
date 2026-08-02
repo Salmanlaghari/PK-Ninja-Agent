@@ -31,6 +31,10 @@ import aiosqlite
 log = logging.getLogger("pk_ninja.settings")
 
 # The canonical, ordered list of preference keys (matches SettingsOut).
+# v1.3.0: Added github_login, github_avatar, github_owner, github_repo —
+# these are non-secret metadata persisted at GitHub-connect time so the
+# agent can auto-bind to the user's repo. The actual token is in the
+# encrypted secret store; these are just identity/binding hints.
 PREFERENCE_KEYS = (
     "theme",
     "ai_provider",
@@ -40,6 +44,10 @@ PREFERENCE_KEYS = (
     "auto_save",
     "auto_commit",
     "notifications",
+    "github_login",
+    "github_avatar",
+    "github_owner",
+    "github_repo",
 )
 
 _SCHEMA = """
@@ -80,6 +88,11 @@ def _config_defaults(settings: Any) -> Dict[str, Any]:
         "auto_save": bool(getattr(settings, "auto_save_enabled", True)),
         "auto_commit": bool(getattr(settings, "auto_commit_enabled", False)),
         "notifications": bool(getattr(settings, "notifications_enabled", True)),
+        # v1.3.0: GitHub binding defaults (empty until user connects).
+        "github_login": "",
+        "github_avatar": "",
+        "github_owner": getattr(settings, "github_owner", "") or "",
+        "github_repo": getattr(settings, "github_repo", "") or "",
     }
 
 
