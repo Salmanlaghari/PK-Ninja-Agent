@@ -1,11 +1,16 @@
 [project]
 name = "pk-ninja-agent"
-version = "1.1.0"
+version = "1.1.1"
 description = "PK Ninja Agent — autonomous coding agent workspace (FastAPI backend)."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
+    # Plain uvicorn (NOT uvicorn[standard]) — on Vercel the platform provides
+    # its own ASGI adapter so uvicorn is only used for local dev. Dropping the
+    # [standard] extra avoids shipping native C-extension wheels
+    # (uvloop/watchfiles/httptools/websockets) that can fail to load on
+    # Vercel's Python 3.12 build image and bloat the 500 MB bundle.
+    "uvicorn>=0.29",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "sse-starlette>=2.1",
