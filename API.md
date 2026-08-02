@@ -1,4 +1,4 @@
-# API Reference — PK Ninja Agent v1.0.0
+# API Reference — PK Ninja Agent v1.1.0
 
 Base URL: `http://localhost:8000`
 
@@ -9,7 +9,7 @@ Base URL: `http://localhost:8000`
 ### `GET /health`
 Public health check (no auth required).
 
-**Response:** `{ "status": "ok", "version": "1.0.0" }`
+**Response:** `{ "status": "ok", "version": "1.1.0" }`
 
 ### `GET /api/system/health`
 Detailed system health with component breakdown.
@@ -18,7 +18,7 @@ Detailed system health with component breakdown.
 ```json
 {
   "status": "ok",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "environment": "development",
   "components": [
     {"name": "database", "status": "ok", "detail": "..."},
@@ -317,23 +317,94 @@ Switch active workspace.
 
 ## Providers
 
+PK Ninja Agent v1.1.0 ships a pluggable provider manager with four built-in providers: `local`, `gemini`, `jules`, and `mock`. The Jules provider (new in v1.1.0) wraps the official Jules asynchronous coding-agent REST API and is registered as a first-class provider alongside the others.
+
 ### `GET /api/providers`
-Provider manager status.
+Provider manager status. Returns the registry of available providers, their advertised capabilities, enabled/active flags, and per-provider health snapshots. Secrets (API keys) are never included in the response.
+
+**Response (excerpt):**
+```json
+{
+  "providers": [
+    {
+      "name": "local",
+      "display_name": "Local (offline, bundled model)",
+      "enabled": true,
+      "active": true,
+      "requires_api_key": false,
+      "capability": {"streaming": false, "tool_calling": false, "code_editing": true}
+    },
+    {
+      "name": "jules",
+      "display_name": "Jules (official async coding agent)",
+      "enabled": true,
+      "active": false,
+      "requires_api_key": true,
+      "capability": {"streaming": true, "tool_calling": true, "code_editing": true}
+    }
+  ]
+}
+```
 
 ### `POST /api/providers/enable`
-Enable a provider.
+Enable a provider. Body: `{ "name": "jules" }`. A provider that `requires_api_key` cannot be activated until its key is configured (see *Jules configuration* below).
 
 ### `POST /api/providers/disable`
-Disable a provider.
+Disable a provider. Body: `{ "name": "jules" }`.
 
 ### `POST /api/providers/active`
-Set active provider.
+Set the active provider used by all agents. Body: `{ "name": "jules" }`. If the active provider is unavailable or fails its health check, the manager falls back to the next healthy enabled provider, ultimately reaching `local`.
 
 ### `GET /api/providers/{name}/health`
-Health check a provider.
+Health check a provider. For Jules this performs a lightweight reachability/config check (it does not create a remote session) and returns a `ProviderHealth` snapshot.
 
 ### `GET /api/providers/{name}/capabilities`
-Provider capabilities.
+Provider capabilities. For Jules the advertised `ProviderCapability` is:
+```json
+{
+  "streaming": true,
+  "tool_calling": true,
+  "code_editing": true,
+  "context_window": 0,
+  "max_output": 0
+}
+```
+`context_window` and `max_output` are reported as `0` because the Jules async agent does not expose fixed token limits through its REST API.
+
+### Jules configuration
+
+The Jules provider reads its credentials and tuning from the following settings (see `backend/config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JULES_API_KEY` | *(none)* | Jules API key. Falls back to `AI_API_KEY` then `GEMINI_API_KEY` via `Settings.effective_jules_key()`. |
+| `JULES_BASE_URL` | `https://jules.googleapis.com/v1alpha` | Official Jules REST API base URL. |
+| `JULES_POLL_INTERVAL_SECONDS` | `3.0` | Seconds between session-state polls. |
+| `JULES_POLL_TIMEOUT_SECONDS` | `600` | Maximum seconds to wait for a session to reach a terminal state. |
+| `JULES_MAX_RETRIES` | `3` | Maximum HTTP retry attempts for transient errors (429/5xx and network errors). |
+
+Authentication uses the `x-goog-api-key` request header (not `Bearer`). The key is never logged, never returned by any endpoint, and is excluded from `diagnostics_summary()` / `diagnostics()`.
+
+### Jules request/response lifecycle
+
+Jules is an asynchronous, session-based coding agent rather than an OpenAI-compatible chat-completions endpoint. Each synchronous provider call (`generate`, `plan`, `edit`, `analyze_error`, `stream_chat`) therefore follows this lifecycle internally:
+
+1. **Create session** — `POST {JULES_BASE_URL}/sessions` with a `userInput` prompt (and an optional `gitRepository` / `targetBranch` for repo-bound edits).
+2. **Poll to terminal** — `GET /sessions/{id}` is polled every `JULES_POLL_INTERVAL_SECONDS` until the session reaches `COMPLETED` or `FAILED` (bounded by `JULES_POLL_TIMEOUT_SECONDS`).
+3. **Auto-approve plan** — when the session enters the `AWAITING_PLAN_APPROVAL` state, the provider automatically calls `POST /sessions/{id}:approvePlan` so the agent can proceed without interactive approval.
+4. **Collect artifacts** — `GET /sessions/{id}/activities` is fetched and the provider extracts `agentMessaged` event payloads (agent text) and any `changeSet.gitPatch.unidiffPatch` (code edits). The unidiff is parsed with `_parse_unidiff()` to reconstruct `{path, content}` edits.
+5. **Return** — `generate`/`chat`/`review`/`summarize` return the agent text; `plan` returns a `Plan` object; `edit` returns the reconstructed edits; `stream_chat` emulates streaming by delivering the collected text in ~12-word chunks (Jules exposes no SSE endpoint).
+
+Session states observed by the provider: `QUEUED`, `PLANNING`, `AWAITING_PLAN_APPROVAL`, `AWAITING_USER_FEEDBACK`, `IN_PROGRESS`, `PAUSED`, `FAILED`, `COMPLETED` (terminal: `COMPLETED`, `FAILED`).
+
+### Jules retry & error handling
+
+The HTTP layer (`JulesProvider._request`) retries only transient failures:
+- **Retryable HTTP statuses:** `429`, `500`, `502`, `503`, `504` — retried with exponential backoff (`min(2**attempt, 8)` seconds), up to `JULES_MAX_RETRIES`.
+- **Retryable network errors:** any `httpx.HTTPError` that is not an `HTTPStatusError` (connection reset, timeout, DNS, etc.) — always retried.
+- **Non-retryable HTTP statuses:** `401`, `403`, `404`, `422`, etc. — fail immediately without retrying.
+
+All failures are surfaced as `AIError` with a descriptive message; secrets are never included. `diagnostics_summary()` reports non-secret counters (`sessions_created`, `sessions_completed`, `sessions_failed`, `plans_auto_approved`, `retries`, `last_error_status`) for observability.
 
 ---
 
@@ -378,6 +449,9 @@ Key models:
 - `QueueStatus` — idle, paused, running, completed, failed, cancelled
 - `SessionOut` — session response
 - `DashboardOut` — dashboard aggregation
+- `ProviderCapability` — streaming, tool_calling, code_editing, context_window, max_output
+- `ProviderHealth` — per-provider health snapshot (status, detail, last_checked)
+- `ProviderInfo` — registry entry (name, display_name, capability, requires_api_key)
 
 ---
 

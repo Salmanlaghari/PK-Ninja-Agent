@@ -38,6 +38,7 @@ from .manager import (
 from .local_provider import LocalAdapter
 from .openai_provider import OpenAIAdapter
 from .gemini_provider import GeminiAdapter
+from .jules_provider import JulesAdapter
 from .mock_provider import MockProvider, MockAdapter
 
 __all__ = [
@@ -53,8 +54,9 @@ __all__ = [
     "LocalAdapter",
     "OpenAIAdapter",
     "GeminiAdapter",
+    "JulesAdapter",
     "MockProvider",
     "MockAdapter",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

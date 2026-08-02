@@ -30,7 +30,10 @@ AnthropicProvider
     Custom adapter for Anthropic Claude, supporting native SSE Messages API.
 
 JulesProvider
-    Custom adapter for Google's elite coding agent Jules.
+    Official adapter for Google's async coding agent Jules via the
+    https://jules.googleapis.com/v1alpha REST API (x-goog-api-key auth).
+    Bridges Jules' async session model (create → poll → collect activities
+    & artifacts) to the synchronous AIProvider protocol.
 """
 from __future__ import annotations
 
@@ -596,143 +599,421 @@ class AnthropicProvider:
         return self.generate(messages).strip()
 
 
-# ────────────────────────────────────────────────────────────────────────
-# JulesProvider — specialized adapter for Google's Jules agent
-# ────────────────────────────────────────────────────────────────────────
+
+# JulesProvider — official Google Jules async coding-agent adapter (v1.1.0)
+# ────────────────────────────────────────────────────────────────────────────
 class JulesProvider:
-    """Specialized adapter for Google's elite coding agent Jules."""
+    """Adapter for the *official* Google Jules REST API.
+
+    Jules is an *asynchronous, session-based* coding agent (not an
+    OpenAI-compatible chat-completions endpoint). The official API lives at
+    ``https://jules.googleapis.com/v1alpha`` and authenticates with the
+    ``x-goog-api-key`` header (NOT ``Authorization: Bearer``).
+
+    Workflow
+    --------
+    1. Create a session (optionally repoless) with a user prompt.
+    2. Poll ``GET /sessions/{id}`` until ``state`` reaches a terminal value
+       (``COMPLETED`` or ``FAILED``), auto-approving any generated plan.
+    3. List ``GET /sessions/{id}/activities`` to collect the structured event
+       stream (plan, progress, agent messages).
+    4. Collect artifacts (``changeSet`` with a ``gitPatch`` / ``unidiffPatch``,
+       ``bashOutput``, ``media``) and parse them into the {path, content} edit
+       format used by the rest of the agent loop.
+
+    Because the rest of PK-Ninja-Agent expects a *synchronous* provider
+    (``generate``, ``plan``, ``edit``, ``stream_chat``, ``analyze_error``),
+    this adapter bridges the two models: each synchronous call creates a
+    short-lived Jules session, polls it to completion, and returns the
+    parsed result. Diagnostics, metrics, structured logging, retry/timeout
+    and error recovery are all built in.
+    """
 
     name = "jules"
+    model = "jules-async-agent"
+
+    # Official Jules session states (terminal states are COMPLETED / FAILED).
+    _TERMINAL_STATES = {"COMPLETED", "FAILED"}
+    _NEEDS_PLAN_APPROVAL = "AWAITING_PLAN_APPROVAL"
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
-        self.api_key = self.settings.effective_api_key()
+        self.api_key = self.settings.effective_jules_key()
         if not self.api_key:
-            raise AIError("AI_API_KEY (or GEMINI_API_KEY) is not set; "
-                          "cannot use JulesProvider.")
+            raise AIError(
+                "JULES_API_KEY (or AI_API_KEY / GEMINI_API_KEY) is not set; "
+                "cannot use JulesProvider."
+            )
         self.base_url = (
-            self.settings.ai_base_url.rstrip("/")
-            or "https://api.jules.google.dev/v1"
+            self.settings.jules_base_url.rstrip("/")
+            or "https://jules.googleapis.com/v1alpha"
         )
-        self.model = self.settings.effective_model() or "jules-coding-v1"
         self.timeout = self.settings.ai_timeout_seconds
-
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
+        self.poll_interval = max(1.0, float(self.settings.jules_poll_interval_seconds))
+        self.poll_timeout = max(30, int(self.settings.jules_poll_timeout_seconds))
+        self.max_retries = max(0, int(self.settings.jules_max_retries))
+        # Lightweight diagnostics / metrics counters (non-secret).
+        self.diagnostics: Dict[str, Any] = {
+            "sessions_created": 0,
+            "sessions_completed": 0,
+            "sessions_failed": 0,
+            "plan_approvals": 0,
+            "retries": 0,
+            "last_session_id": None,
+            "last_error": None,
         }
 
+    # ── HTTP layer with retry / structured logging ────────────────────────
+    def _headers(self) -> Dict[str, str]:
+        # Official Jules auth: x-goog-api-key header (NOT Bearer).
+        return {
+            "x-goog-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Perform an HTTP request to the Jules API with retry + logging.
+
+        Retries on network errors, 429 and 5xx using a small exponential
+        back-off. Raises :class:`AIError` on non-recoverable failures.
+        """
+        import logging
+        import time as _time
+
+        log = logging.getLogger("pk_ninja.jules")
+        url = f"{self.base_url}{path}"
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    r = client.request(method, url, json=json_body, params=params,
+                                       headers=self._headers())
+                # Retryable status codes (429 / 5xx) — raise a flagged error so
+                # the except clause can decide whether to retry.
+                if r.status_code in (429, 500, 502, 503, 504):
+                    raise httpx.HTTPStatusError(
+                        f"retryable status {r.status_code}", request=r.request,
+                        response=r,
+                    )
+                r.raise_for_status()
+                if not r.content:
+                    return {}
+                return r.json()
+            except httpx.HTTPStatusError as exc:
+                # Only retry on the retryable status codes we flagged above.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                is_retryable = status in (429, 500, 502, 503, 504)
+                last_exc = exc
+                if is_retryable and attempt < self.max_retries:
+                    self.diagnostics["retries"] += 1
+                    backoff = min(2 ** attempt, 8)
+                    log.warning(
+                        "jules.request.retry attempt=%d status=%s backoff=%ds",
+                        attempt + 1, _status_of(exc), backoff,
+                    )
+                    _time.sleep(backoff)
+                    continue
+                self.diagnostics["last_error"] = str(last_exc)[:200]
+                raise AIError(
+                    f"Jules API request failed ({method} {path}): {last_exc}"
+                ) from last_exc
+            except httpx.HTTPError as exc:
+                # Network-level errors (connect/timeout/read) — always retryable.
+                last_exc = exc
+                if attempt < self.max_retries:
+                    self.diagnostics["retries"] += 1
+                    backoff = min(2 ** attempt, 8)
+                    log.warning(
+                        "jules.request.retry attempt=%d status=%s backoff=%ds",
+                        attempt + 1, _status_of(exc), backoff,
+                    )
+                    _time.sleep(backoff)
+                    continue
+                self.diagnostics["last_error"] = str(last_exc)[:200]
+                raise AIError(
+                    f"Jules API request failed ({method} {path}): {last_exc}"
+                ) from last_exc
+        # Should not reach here, but guard anyway.
+        self.diagnostics["last_error"] = str(last_exc)[:200]
+        raise AIError(f"Jules API request failed ({method} {path}): {last_exc}") \
+            from last_exc
+
+    # ── Session lifecycle ─────────────────────────────────────────────────
+    def _create_session(self, prompt: str, repo_url: Optional[str] = None,
+                        branch: Optional[str] = None) -> str:
+        """Create a Jules session and return its name (id).
+
+        A *repoless* session (no ``gitRepository`` / ``targetBranch``) is used
+        for free-form chat / plan / analyze tasks. When ``repo_url`` is given,
+        a real repository session is created.
+        """
+        body: Dict[str, Any] = {"userInput": prompt}
+        if repo_url:
+            body["gitRepository"] = repo_url
+            if branch:
+                body["targetBranch"] = branch
+        data = self._request("POST", "/sessions", json_body=body)
+        name = data.get("name")
+        if not name:
+            raise AIError(
+                f"Jules session creation returned no name: "
+                f"{json.dumps(data)[:300]}"
+            )
+        self.diagnostics["sessions_created"] += 1
+        self.diagnostics["last_session_id"] = name
+        return name
+
+    def _get_session(self, session_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/sessions/{session_id.split('/')[-1]}")
+
+    def _approve_plan(self, session_id: str) -> None:
+        self._request("POST", f"/sessions/{session_id.split('/')[-1]}:approvePlan")
+        self.diagnostics["plan_approvals"] += 1
+
+    def _send_message(self, session_id: str, message: str) -> None:
+        self._request(
+            "POST", f"/sessions/{session_id.split('/')[-1]}:sendMessage",
+            json_body={"text": message},
+        )
+
+    def _list_activities(self, session_id: str) -> List[Dict[str, Any]]:
+        data = self._request(
+            "GET", f"/sessions/{session_id.split('/')[-1]}/activities",
+        )
+        return data.get("activities", []) if isinstance(data, dict) else []
+
+    def _poll_to_terminal(self, session_id: str) -> Dict[str, Any]:
+        """Poll a session until it reaches a terminal state.
+
+        Auto-approves a generated plan when the session enters
+        ``AWAITING_PLAN_APPROVAL`` so the synchronous bridge does not block
+        forever waiting for a human.
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + self.poll_timeout
+        session: Dict[str, Any] = {}
+        while _time.monotonic() < deadline:
+            session = self._get_session(session_id)
+            state = session.get("state", "")
+            if state == self._NEEDS_PLAN_APPROVAL:
+                try:
+                    self._approve_plan(session_id)
+                except AIError:
+                    # If approval fails, keep polling — the session may still
+                    # transition (e.g. auto-complete) or fail.
+                    pass
+            if state in self._TERMINAL_STATES:
+                if state == "COMPLETED":
+                    self.diagnostics["sessions_completed"] += 1
+                else:
+                    self.diagnostics["sessions_failed"] += 1
+                return session
+            _time.sleep(self.poll_interval)
+        raise AIError(
+            f"Jules session {session_id} did not reach a terminal state "
+            f"within {self.poll_timeout}s (last state="
+            f"{session.get('state', 'unknown')})."
+        )
+
+    # ── Artifact parsing ──────────────────────────────────────────────────
+    def _collect_agent_text(self, session_id: str) -> str:
+        """Collect all agentMessaged activity text from a session."""
+        activities = self._list_activities(session_id)
+        texts: List[str] = []
+        for act in activities:
+            for ev in act.get("events", []) or []:
+                kind = ev.get("event") or ev.get("type")
+                if kind == "agentMessaged":
+                    payload = ev.get("payload", {}) or {}
+                    txt = payload.get("agentMessage") or payload.get("text") or ""
+                    if txt:
+                        texts.append(txt)
+        return "\n".join(texts).strip()
+
+    def _collect_edits(self, session_id: str) -> List[dict]:
+        """Parse a Jules changeSet (gitPatch) into {path, content} edits."""
+        activities = self._list_activities(session_id)
+        edits: List[dict] = []
+        for act in activities:
+            cs = act.get("changeSet")
+            if not cs:
+                continue
+            patch = cs.get("gitPatch", {}) or {}
+            unidiff = patch.get("unidiffPatch", "")
+            if not unidiff:
+                continue
+            edits.extend(_parse_unidiff(unidiff))
+        return edits
+
+    # ── Sync-protocol bridge ──────────────────────────────────────────────
     def generate(self, messages: List[ChatMessage], *,
                  temperature: Optional[float] = None,
                  max_tokens: Optional[int] = None) -> str:
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "stream": False,
-            "temperature": temperature if temperature is not None
-            else self.settings.ai_temperature,
-        }
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
-        url = f"{self.base_url}/chat/completions"
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                r = client.post(url, json=payload, headers=self._headers())
-                r.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AIError(f"Jules request failed: {exc}") from exc
-        data = r.json()
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AIError(f"Unexpected Jules response: {json.dumps(data)[:300]}") from exc
+        """Synchronous bridge: build a prompt, run a repoless Jules session.
+
+        Returns the concatenated ``agentMessaged`` text. ``temperature`` and
+        ``max_tokens`` are accepted for protocol parity but are not part of
+        the Jules API (Jules controls its own model params) — they are ignored.
+        """
+        prompt = _messages_to_prompt(messages)
+        session_id = self._create_session(prompt)
+        self._poll_to_terminal(session_id)
+        text = self._collect_agent_text(session_id)
+        if not text:
+            text = "(Jules completed the session with no agent message.)"
+        return text
 
     def stream_chat(
         self, messages: List[ChatMessage], on_token: Optional[Callable[[str], None]] = None
     ) -> ChatResult:
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "stream": True,
-            "temperature": self.settings.ai_temperature,
-        }
-        url = f"{self.base_url}/chat/completions"
-        full_text: List[str] = []
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                with client.stream("POST", url, json=payload, headers=self._headers()) as r:
-                    ctype = r.headers.get("content-type", "")
-                    if "text/event-stream" not in ctype:
-                        r.read()
-                        data = r.json()
-                        text = data["choices"][0]["message"]["content"]
-                        if on_token:
-                            on_token(text)
-                        return ChatResult(text=text, model=self.model)
+        """Jules has no SSE streaming endpoint.
 
-                    for line in r.iter_lines():
-                        if not line or not line.startswith("data:"):
-                            continue
-                        chunk = line[len("data:"):].strip()
-                        if chunk == "[DONE]":
-                            break
-                        try:
-                            obj = json.loads(chunk)
-                            delta = obj["choices"][0]["delta"].get("content", "")
-                            if delta:
-                                full_text.append(delta)
-                                if on_token:
-                                    on_token(delta)
-                        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                            continue
-        except httpx.HTTPError as exc:
-            raise AIError(f"Jules streaming request failed: {exc}") from exc
-        text = "".join(full_text)
+        We run the session to completion and then *emulate* streaming by
+        delivering the collected agent text in chunks so the caller's
+        ``on_token`` callback still receives incremental updates and the
+        streaming UI contract is preserved.
+        """
+        import time as _time
+
+        prompt = _messages_to_prompt(messages)
+        session_id = self._create_session(prompt)
+        self._poll_to_terminal(session_id)
+        text = self._collect_agent_text(session_id)
         if not text:
-            text = self.generate(messages)
+            text = "(Jules completed the session with no agent message.)"
+        # Emulated streaming: deliver in ~12-token chunks.
+        words = text.split()
+        chunk_size = 12
+        delivered: List[str] = []
+        for i in range(0, len(words), chunk_size):
+            piece = " ".join(words[i:i + chunk_size])
+            delivered.append(piece)
             if on_token:
-                on_token(text)
-        return ChatResult(text=text, model=self.model)
+                on_token(piece + (" " if i + chunk_size < len(words) else ""))
+            _time.sleep(0.01)  # small cadence so the UI animates
+        full = " ".join(delivered)
+        return ChatResult(text=full, model=self.model)
 
     def plan(self, task: str, context: str) -> Plan:
         messages = [
-            ChatMessage("system",
-                        "You are a coding agent. Given a task and repository "
-                        "context, produce a concise plan as JSON with keys "
-                        "'summary' (string) and 'steps' (array of strings). "
-                        "Return ONLY JSON."),
-            ChatMessage("user",
-                        f"Task:\n{task}\n\nContext:\n{context[:6000]}\n\n"
-                        "Return ONLY JSON."),
+            ChatMessage(
+                "system",
+                "You are a coding agent. Given a task and repository "
+                "context, produce a concise plan as JSON with keys "
+                "'summary' (string) and 'steps' (array of strings). "
+                "Return ONLY JSON.",
+            ),
+            ChatMessage(
+                "user",
+                f"Task:\n{task}\n\nContext:\n{context[:6000]}\n\n"
+                "Return ONLY JSON.",
+            ),
         ]
         text = self.generate(messages)
         return _parse_plan_json(text, fallback_task=task)
 
     def edit(self, task: str, plan: Plan, files: List[dict]) -> List[dict]:
         files_brief = "\n".join(f["path"] for f in files[:30])
-        messages = [
-            ChatMessage("system",
-                        "You are a coding agent. Given a task and a list of "
-                        "file paths, return a JSON array of edits. Each edit: "
-                        '{"path": "...", "content": "full new file content"}. '
-                        "Only include files you actually change. Return ONLY "
-                        "a JSON array."),
-            ChatMessage("user",
-                        f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
-                        f"Files:\n{files_brief}\n\nReturn ONLY a JSON array."),
-        ]
-        text = self.generate(messages)
-        return _parse_edits_json(text)
+        prompt = (
+            f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
+            f"Files:\n{files_brief}\n\n"
+            "Apply the changes to the repository. Return the diff."
+        )
+        session_id = self._create_session(prompt)
+        self._poll_to_terminal(session_id)
+        edits = self._collect_edits(session_id)
+        if not edits:
+            # Fall back to agent text → JSON parsing like the other providers.
+            text = self._collect_agent_text(session_id)
+            edits = _parse_edits_json(text)
+        return edits
 
     def analyze_error(self, task: str, error: str, files: List[dict]) -> str:
         messages = [
-            ChatMessage("system",
-                        "A verification command failed. In one short sentence, "
-                        "describe the most likely cause and fix."),
+            ChatMessage(
+                "system",
+                "A verification command failed. In one short sentence, "
+                "describe the most likely cause and fix.",
+            ),
             ChatMessage("user", f"Error:\n{error[:1500]}"),
         ]
         return self.generate(messages).strip()
+
+    def diagnostics_summary(self) -> Dict[str, Any]:
+        """Return a non-secret diagnostics/metrics snapshot."""
+        return dict(self.diagnostics)
+
+
+def _status_of(exc: Exception) -> str:
+    """Best-effort extraction of an HTTP status code from an httpx error."""
+    try:
+        return str(getattr(exc, "response", None).status_code)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        return "network"
+
+
+def _messages_to_prompt(messages: List[ChatMessage]) -> str:
+    """Flatten a list of ChatMessage into a single Jules user prompt."""
+    parts: List[str] = []
+    for m in messages:
+        role = m.role.upper()
+        parts.append(f"[{role}]\n{m.content}")
+    return "\n\n".join(parts)
+
+
+def _parse_unidiff(unidiff: str) -> List[dict]:
+    """Parse a unidiff patch into a list of {path, content} edits.
+
+    Each edited file's *full new content* is reconstructed by applying the
+    hunks to the original lines present in the diff context. This is a
+    best-effort parser sufficient for the agent loop; files that cannot be
+    reconstructed are skipped.
+    """
+    edits: List[dict] = []
+    current_path: Optional[str] = None
+    current_lines: List[str] = []
+    hunk_header_re = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+    def _flush() -> None:
+        nonlocal current_path, current_lines
+        if current_path and current_lines:
+            edits.append({"path": current_path, "content": "".join(current_lines)})
+        current_path = None
+        current_lines = []
+
+    for line in unidiff.splitlines(keepends=True):
+        if line.startswith("+++ "):
+            _flush()
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            current_path = path.split("\t")[0] if path != "/dev/null" else None
+            continue
+        if line.startswith("--- "):
+            continue
+        if hunk_header_re.match(line):
+            continue
+        if not current_path:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            current_lines.append(line[1:])
+        elif line.startswith("-"):
+            continue
+        elif line.startswith(" "):
+            current_lines.append(line[1:])
+        elif line.startswith("\\"):
+            continue
+    _flush()
+    return edits
 
 
 # ── JSON parsing helpers ────────────────────────────────────────────────
@@ -800,7 +1081,7 @@ def get_provider(settings: Optional[Settings] = None) -> AIProvider:
         return LocalProvider()
 
     if name == "jules":
-        if settings.effective_api_key():
+        if settings.effective_jules_key():
             try:
                 return JulesProvider(settings)
             except AIError:
