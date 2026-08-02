@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
-import os
 import queue
-import shlex
 import signal
 import subprocess
 import threading
@@ -669,7 +667,6 @@ class Agent:
                   fix_rounds=result.data.get("fix_rounds"))
 
     def _execute_plan_steps(self, rt: TaskRuntime, ws: Workspace, file_objs: List[dict]) -> None:
-        import json
         for step in rt.plan_steps:
             self._check_cancel(rt)
             step["status"] = "running"

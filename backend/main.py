@@ -34,6 +34,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+# ruff: noqa: E402 — imports must come after sys.path manipulation above
 from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
 from fastapi.responses import (FileResponse, JSONResponse, Response,
@@ -46,8 +47,8 @@ from agent import (BUS, cancel_task, get_runtime,
                    list_runtimes, new_task_id, start_task)
 from ai_provider import provider_status
 from auth import (AuthError, InvalidTokenError, User,
-                  get_auth_service, reset_auth_service)
-from config import Settings, get_settings
+                  get_auth_service)
+from config import get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
 from release_checks import system_health as _system_health
@@ -56,31 +57,27 @@ from workspace_manager import (WorkspaceManagerError, create_workspace,
                                recent_workspaces, rename_workspace,
                                switch_workspace)
 from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
-                    EventOut, EventType, GitHubLoginRequest, GitBranchRequest,
+                    EventType, GitHubLoginRequest, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
-                    ExportRequest, ExportHistoryRequest, HistoryDetailOut,
-                    HistoryListOut, HistoryStatsOut,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
                     ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
-                    QueueListOut, RecoveryActionRequest, RecoverySummaryOut,
-                    ReorderRequest, RetryRequest, SessionActionRequest,
-                    SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
+                    QueueListOut, RecoveryActionRequest, ReorderRequest, RetryRequest, SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
                     SystemHealthComponent, SystemHealthOut, TaskCreate,
-                    TaskQueueItem, TaskStatus, TaskSummary, UserOut,
+                    TaskQueueItem, TaskStatus, UserOut,
                     WorkspaceActionRequest, WorkspaceCreateRequest,
                     WorkspaceOut, WorkspaceRenameRequest,
                     WorkspaceSessionListOut, WorkspaceSessionOut,
                     CommandCheckOut, CommandCheckRequest,
                     SensitivePathOut, SensitivePathRequest,
                     WorkspaceValidationOut, normalize_status)
-from workspace import Workspace, WorkspaceError
+from workspace import WorkspaceError
 
 # v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
 from scheduler import (TaskScheduler, get_scheduler,
                        init_scheduler, reset_scheduler)
 from worker import (get_worker, init_worker,
-                    reset_worker, stop_worker)
+                    reset_worker)
 from sessions import (close_session as _close_session, create_session,
                       delete_session as _delete_session, find_active_for_repo,
                       get_session, list_sessions, touch_session)

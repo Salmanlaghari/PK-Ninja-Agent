@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
@@ -403,7 +402,6 @@ def full_command_check(
     Returns ``(allowed, reason, issues)`` where *issues* is a list of
     human-readable strings (empty when allowed).
     """
-    issues: List[str] = []
 
     # 1) Extra blocklist first (fast string scan).
     extra = check_extra_blocked(command)

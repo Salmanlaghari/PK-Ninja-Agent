@@ -21,7 +21,6 @@ needs it reports ``unavailable`` so the endpoint never crashes.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 

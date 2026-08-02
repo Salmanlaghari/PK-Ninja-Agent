@@ -13,7 +13,7 @@ honestly reports "no command required" and succeeds.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from agents.base import (
     AgentContext,
@@ -112,7 +112,7 @@ class TerminalAgent(BaseAgent):
         commands that the task implies (e.g. compile, install deps).
         """
         try:
-            files = set(ctx.workspace.list_files())
+            _ = ctx.workspace.list_files()  # noqa: F841
         except Exception:
             return []
 

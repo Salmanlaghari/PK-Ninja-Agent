@@ -311,13 +311,13 @@ class Workspace:
         return self._git(["checkout", "-b", branch])
 
     def git_stage_file(self, rel_path: str) -> CommandResult:
-        p = self.safe_path(rel_path)  # Sandbox containment check
+        self.safe_path(rel_path)  # noqa: F841 — sandbox containment
         return self._git(["add", rel_path])
 
     def git_unstage_file(self, rel_path: str) -> CommandResult:
-        p = self.safe_path(rel_path)  # Sandbox containment check
+        self.safe_path(rel_path)  # noqa: F841 — sandbox containment
         return self._git(["reset", "HEAD", rel_path])
 
     def git_discard_file(self, rel_path: str) -> CommandResult:
-        p = self.safe_path(rel_path)  # Sandbox containment check
+        self.safe_path(rel_path)  # noqa: F841 — sandbox containment
         return self._git(["checkout", "--", rel_path])

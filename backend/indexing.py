@@ -322,7 +322,6 @@ async def build_tree_nodes(task_id: str, ws: Workspace, db: aiosqlite.Connection
     def convert_node(node: dict) -> dict:
         if node["type"] == "file":
             return node
-        sorted_children = []
         dirs = []
         files = []
         for name, child in node["children"].items():

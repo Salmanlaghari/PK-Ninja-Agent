@@ -24,15 +24,12 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Type
 
 from .interface import (
     ProviderCapability,
     ProviderInfo,
-    ProviderProtocol,
     ProviderStatus,
-    ProviderHealth,
 )
 
 logger = logging.getLogger(__name__)

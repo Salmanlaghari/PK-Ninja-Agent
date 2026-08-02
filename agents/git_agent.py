@@ -11,7 +11,7 @@ says so honestly.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 from agents.base import (
     AgentContext,
@@ -139,7 +139,7 @@ class GitAgent(BaseAgent):
     def _pr_body(self, ctx: AgentContext, changed: List[str], branch: str) -> str:
         review = ctx.review or {}
         review_summary = review.get("summary", "no review notes")
-        edits = ctx.edits or []
+        _ = ctx.edits  # noqa: F841 — side effect
         lines = [
             f"## Summary\n{ctx.description}",
             "",

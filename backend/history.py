@@ -153,7 +153,6 @@ async def query_history(
         where_parts.append("created_at <= ?")
         params.append(date_to)
 
-    search_task_ids: Optional[List[str]] = None
     if search:
         search_like = f"%{search.lower()}%"
         where_parts.append(

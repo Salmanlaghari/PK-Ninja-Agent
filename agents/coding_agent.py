@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, Dict, List
 
 from agents.base import (
@@ -90,7 +89,7 @@ class CodingAgent(BaseAgent):
     def _edits_with_provider(self, ctx: AgentContext, provider: Any,
                              files: List[Dict[str, Any]], plan: List[Dict[str, Any]],
                              message: AgentMessage) -> List[Dict[str, Any]]:
-        from ai_provider import ChatMessage, Plan, _parse_edits_json
+        from ai_provider import ChatMessage, _parse_edits_json
 
         files_brief = "\n".join(f["path"] for f in files[:30])
         plan_text = "\n".join(f"{s['id']}. {s['description']}" for s in plan) or "(no plan)"

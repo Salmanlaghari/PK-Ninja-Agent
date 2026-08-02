@@ -89,7 +89,6 @@ def setup_metrics(app: Any) -> None:
         log.info("Metrics disabled — install prometheus_client to enable")
         return
 
-    from fastapi import Response
     from fastapi.responses import PlainTextResponse
 
     APP_INFO.info({

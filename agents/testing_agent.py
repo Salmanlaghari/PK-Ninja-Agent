@@ -60,7 +60,7 @@ class TestingAgent(BaseAgent):
         ctx.emit_event("test_started", f"Testing agent running: {cmd}", command=cmd,
                        agent=AgentRole.testing.value)
         try:
-            decision = validate_command(cmd)
+            validate_command(cmd)  # noqa: F841 — validates before run
             result = run_command(cmd, ws, rt=get_runtime_for_ctx(ctx))
         except TerminalError as exc:
             ctx.emit_event("error", f"Testing command rejected: {exc}", command=cmd,

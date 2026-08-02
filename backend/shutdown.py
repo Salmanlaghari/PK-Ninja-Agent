@@ -26,7 +26,6 @@ _shutdown_state = {"initiated": False}
 
 def register_shutdown_handlers(app: Any) -> None:
     """Register signal handlers and lifespan events for graceful shutdown."""
-    import uvicorn
 
     loop: Optional[asyncio.AbstractEventLoop] = None
 

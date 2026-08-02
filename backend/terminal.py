@@ -360,7 +360,7 @@ def run_command(command: str, workspace: Workspace,
     # If the task was cancelled mid-run, record it truthfully.
     cancelled = False
     if rt is not None and getattr(rt, "cancel", None) and rt.cancel.is_set():
-        cancelled = True
+        cancelled = True  # noqa: F841
         if not stderr:
             stderr = "Command terminated because the task was cancelled."
 
