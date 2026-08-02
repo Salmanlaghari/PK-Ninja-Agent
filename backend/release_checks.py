@@ -1,4 +1,4 @@
-"""Release-preparation startup checks & environment validation (v1.0.1).
+"""Release-preparation startup checks & environment validation (v1.0.2).
 
 Run lightweight, non-blocking checks at startup so the operator gets a clear
 picture of the deployment health. No check ever raises — they return a list of
@@ -113,7 +113,7 @@ def system_health(settings: Any) -> Dict[str, Any]:
         overall = "ok"
     return {
         "status": overall,
-        "version": "1.0.1",
+        "version": "1.0.2",
         "environment": getattr(settings, "app_env", "development"),
         "components": checks,
     }

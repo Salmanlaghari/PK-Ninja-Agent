@@ -4,9 +4,24 @@ PK Ninja Agent is a FastAPI web application with SQLite persistence, WebSocket s
 
 ---
 
+## Deploy via GitHub Actions (Automated)
+
+Once you configure secrets, deployment is one click:
+
+1. Go to **Settings → Secrets → Actions** in your GitHub repo
+2. Add the secret for your platform:
+   - **Fly.io**: `FLY_API_TOKEN` (get from `flyctl auth token`)
+   - **Render**: `RENDER_API_KEY` + `RENDER_SERVICE_ID`
+3. Go to **Actions → Deploy → Run workflow**
+4. Select platform and click **Run workflow**
+
+The workflow deploys, verifies health, and reports the public URL.
+
+---
+
 ## Quick Deploy Options
 
-### Option 1: Render (Recommended — Free Tier)
+### Option 1: Fly.io (Recommended — Free Tier)
 
 1. **Push your code to GitHub**
 2. **Go to [render.com](https://render.com)** → New → Blueprint
