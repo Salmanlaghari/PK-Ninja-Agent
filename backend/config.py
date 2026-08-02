@@ -65,6 +65,27 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
+    # ── Jules (Google's async coding agent) — official REST API (v1.1.0) ────
+    # Dedicated API key for the official Jules API at
+    # https://jules.googleapis.com/v1alpha. Auth uses the x-goog-api-key
+    # header. Falls back to AI_API_KEY / GEMINI_API_KEY for convenience.
+    jules_api_key: str = Field(default="", alias="JULES_API_KEY")
+    # Optional override for the Jules API base URL.
+    jules_base_url: str = Field(
+        default="https://jules.googleapis.com/v1alpha", alias="JULES_BASE_URL"
+    )
+    # Polling interval (seconds) when waiting for a Jules session to reach a
+    # terminal state (COMPLETED / FAILED).
+    jules_poll_interval_seconds: float = Field(
+        default=3.0, alias="JULES_POLL_INTERVAL"
+    )
+    # Maximum total seconds to poll a single session before timing out.
+    jules_poll_timeout_seconds: int = Field(
+        default=600, alias="JULES_POLL_TIMEOUT"
+    )
+    # Maximum number of HTTP retries on transient failures (429/5xx/network).
+    jules_max_retries: int = Field(default=3, alias="JULES_MAX_RETRIES")
+
     # ── Provider Plugin System (v0.6.0) ─────────────────────────────────
     # Comma-separated list of provider names to enable (others are disabled).
     # Empty means "all built-in adapters enabled". Server-side only.
@@ -169,6 +190,15 @@ class Settings(BaseSettings):
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
         return self.ai_model or self.gemini_model
+
+    def effective_jules_key(self) -> str:
+        """Resolve the Jules API key.
+
+        Prefers the dedicated JULES_API_KEY, then falls back to the generic
+        AI_API_KEY and the legacy GEMINI_API_KEY so a single Google key can be
+        reused across providers.
+        """
+        return self.jules_api_key or self.ai_api_key or self.gemini_api_key
 
     def provider_enabled_names(self) -> list:
         """Parse PROVIDER_ENABLED into a list of provider names (empty = all)."""

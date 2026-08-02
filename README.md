@@ -60,21 +60,22 @@ pk-ninja-agent/
 │   ├── terminal.py      # real subprocess exec + allowlist/blocklist + timeout
 │   ├── github.py        # clone/pull, branch, commit, push, PR prep (server-side)
 │   ├── workspace.py     # path-safe file ops + git helpers (sandbox per task)
-│   ├── ai_provider.py   # AIProvider interface + Local + Gemini adapter
+│   ├── ai_provider.py   # AIProvider interface + Local + OpenAI + Gemini + Anthropic + Jules adapters
 │   ├── models.py        # pydantic schemas + EventType/TaskStatus enums
 │   └── config.py        # env-driven settings (secrets stay server-side)
-├── providers/           # v0.6.0 Provider Plugin System
+├── providers/           # Provider Plugin System (v0.6.0, Jules added v1.1.0)
 │   ├── interface.py     # ProviderCapability, ProviderHealth, ProviderInfo, ProviderProtocol
 │   ├── manager.py       # ProviderManager: registry, dynamic load, health, fallback
 │   ├── local_provider.py     # LocalAdapter (wraps existing LocalProvider)
 │   ├── openai_provider.py    # OpenAIAdapter (any OpenAI-compatible endpoint)
 │   ├── gemini_provider.py    # GeminiAdapter (config-only, OpenAI-compatible route)
+│   ├── jules_provider.py     # JulesAdapter (official async Jules REST API, v1.1.0)
 │   └── mock_provider.py      # MockProvider (deterministic test double)
 ├── frontend/
 │   ├── index.html       # mobile-first ninja UI (+ Provider Management panel)
 │   ├── app.js           # SSE consumer, panels, git controls, provider panel
 │   └── style.css        # dark "shinobi" theme
-├── tests/               # pytest suite (114 existing + 65 provider system tests)
+├── tests/               # pytest suite (114 existing + 65 provider system + 41 Jules tests)
 ├── .devcontainer/       # Codespaces config
 ├── requirements.txt
 ├── .env.example
@@ -119,13 +120,21 @@ DATABASE_PATH=./pk_ninja.db
 HOST=0.0.0.0
 PORT=8000
 
-AI_PROVIDER=local        # or "gemini"
+AI_PROVIDER=local        # or "openai" | "gemini" | "anthropic" | "jules"
 GEMINI_API_KEY=          # only if AI_PROVIDER=gemini
 GEMINI_MODEL=gemini-1.5-flash
 
+# Jules — Google's official async coding agent (v1.1.0)
+AI_PROVIDER=jules        # set to "jules" to use the official Jules REST API
+JULES_API_KEY=           # x-goog-api-key; falls back to AI_API_KEY / GEMINI_API_KEY
+JULES_BASE_URL=https://jules.googleapis.com/v1alpha
+JULES_POLL_INTERVAL=3    # seconds between session-state polls
+JULES_POLL_TIMEOUT=600   # max seconds to poll one session
+JULES_MAX_RETRIES=3      # retries on 429 / 5xx / network errors
+
 # v0.6.0 Provider Plugin System (all optional, opt-in)
 PROVIDER_MANAGER_ENABLED=false   # set "true" to use the ProviderManager + fallback
-PROVIDER_ENABLED=local,openai,gemini   # comma-separated enabled provider list
+PROVIDER_ENABLED=local,openai,gemini,jules   # comma-separated enabled provider list
 PROVIDER_FALLBACK_ORDER=          # explicit fallback chain (overrides auto-built)
 PROVIDER_HEALTH_INTERVAL=300      # seconds between background health probes
 
@@ -261,19 +270,35 @@ The frontend is served by the same FastAPI app — there is no separate build st
 
 ---
 
-## 11. Future Jules Integration
+## 11. Jules Integration (v1.1.0)
 
-The architecture was deliberately built so a new AI provider — including Google's **Jules** coding agent — can be plugged in without rewriting GitHub, terminal, workspace, or UI code.
+The architecture was deliberately built so a new AI provider — including Google's **Jules** coding agent — can be plugged in without rewriting GitHub, terminal, workspace, or UI code. As of **v1.1.0**, Jules is integrated as a first-class provider using the **official** Jules REST API.
 
-### Recommended next step
+### What was integrated
 
-1. **Implement a `JulesProvider`** in `backend/ai_provider.py` that satisfies the `AIProvider` protocol (`plan`, `edit`, `analyze_error`). It can call the Jules API via `httpx` and parse its responses into the same `Plan` / edit-dict shapes the agent already consumes.
-2. **Add `AI_PROVIDER=jules`** to `config.py` and wire it in the `get_provider()` factory alongside `local` and `gemini`. Add any `JULES_API_KEY` / `JULES_ENDPOINT` settings following the existing pattern.
-3. **Keep the tool layer unchanged.** Jules (like any provider) only decides *what* to do; the actual file edits and command execution still flow through `workspace.py` and `terminal.py`, preserving all sandboxing and safety guarantees.
-4. **Reuse the event bus.** A Jules provider can emit the same `EventType`s so the frontend needs zero changes — live activity and terminal output continue to render from real tool results.
-5. **PR handoff.** Because `github.prepare_pull_request()` already builds the PR title/body/command, a Jules integration can optionally hand off the final commit/PR step to Jules's own git workflow by calling the same server-side functions.
+1. **`JulesProvider`** in `backend/ai_provider.py` now talks to the official async Jules API at `https://jules.googleapis.com/v1alpha`, authenticating with the `x-goog-api-key` header (not `Bearer`). The previous OpenAI-compatible stub was replaced entirely. The provider bridges Jules' *async session model* (create session → poll state → auto-approve plan → list activities → collect artifacts) to PK-Ninja-Agent's *synchronous* `AIProvider` protocol (`generate`, `plan`, `edit`, `stream_chat`, `analyze_error`).
+2. **`JulesAdapter`** in `providers/jules_provider.py` exposes `JulesProvider` through the Provider Plugin System, declaring its capabilities (code editing via real git patches, emulated streaming, autonomous tool calling) and integrating with the `ProviderManager` registry, health monitoring, and fallback chain.
+3. **Configuration** in `backend/config.py` adds `JULES_API_KEY`, `JULES_BASE_URL`, `JULES_POLL_INTERVAL`, `JULES_POLL_TIMEOUT`, and `JULES_MAX_RETRIES`. The key resolver falls back to `AI_API_KEY` / `GEMINI_API_KEY` so a single Google key can be reused. `AI_PROVIDER=jules` is wired into the `get_provider()` factory.
+4. **Production hardening** is built in: structured logging (`pk_ninja.jules`), exponential-backoff retry on 429/5xx/network errors (non-retryable HTTP errors fail fast), timeout-bounded polling, auto plan-approval so the synchronous bridge never blocks on a human, a non-secret diagnostics/metrics snapshot (`sessions_created`, `sessions_completed`, `sessions_failed`, `plan_approvals`, `retries`), and strict no-key-leak guarantees verified by the test suite.
+5. **Tool layer unchanged.** Jules only decides *what* to do; the actual file edits and command execution still flow through `workspace.py` and `terminal.py`, preserving all sandboxing and safety guarantees. Jules' `changeSet` git patches are parsed into the same `{path, content}` edit format every other provider produces.
+6. **Agent support.** Because `JulesProvider` implements `generate(messages)` and `stream_chat(messages)`, all seven specialized agents (Planner, Coding, Repository, Review, Terminal, Testing, Git) can use it transparently — they call `provider.generate()` / `provider.stream_chat()` and never hard-code a provider.
 
-This keeps the agent's safety model intact while letting a more capable model drive planning and editing.
+### Enabling Jules
+
+```bash
+AI_PROVIDER=jules
+JULES_API_KEY=AQ.your_jules_api_key_here   # x-goog-api-key
+# Optional tuning:
+JULES_POLL_INTERVAL=3
+JULES_POLL_TIMEOUT=600
+JULES_MAX_RETRIES=3
+```
+
+If `JULES_API_KEY` is unset, the factory and the `ProviderManager` both degrade gracefully to `LocalProvider` / `None` so a missing key never breaks startup. The key is read server-side only and is never exposed through `/api/config`, `/api/dashboard`, `/api/providers`, or any health/status endpoint (verified by secret-leak guards in the test suite).
+
+### Manual configuration note
+
+The Jules API key is the only credential that requires manual provisioning. Obtain it from Google Jules (jules.google) and set it as the `JULES_API_KEY` environment variable (or `AI_API_KEY` / `GEMINI_API_KEY` to reuse an existing Google key). No other manual steps are required — everything else (registration, capability detection, health monitoring, fallback, agent wiring, dashboard integration) is automatic.
 
 ---
 
@@ -283,7 +308,7 @@ A modular, opt-in **Provider Plugin System** that adds dynamic provider loading,
 
 ### Design principles
 
-- **Do not rebuild.** The new `providers/` package wraps the existing provider classes via the adapter pattern; `LocalAdapter`, `OpenAIAdapter`, and `GeminiAdapter` delegate to the original `LocalProvider`/`OpenAIProvider`/`GeminiProvider` implementations.
+- **Do not rebuild.** The new `providers/` package wraps the existing provider classes via the adapter pattern; `LocalAdapter`, `OpenAIAdapter`, `GeminiAdapter`, and `JulesAdapter` (added in v1.1.0) delegate to the original `LocalProvider`/`OpenAIProvider`/`GeminiProvider`/`JulesProvider` implementations.
 - **Backward compatible by default.** `PROVIDER_MANAGER_ENABLED=false` (the default) means `Agent` still uses the original `get_provider()` factory with zero behavior change. Only when the flag is `true` does the `ProviderManager` take over selection, fallback, and health tracking.
 - **Provider independent.** The agent and UI never hard-code a provider; they ask the manager for the active provider and its capabilities.
 - **No unsupported APIs.** The `GeminiAdapter` is configuration-only and routes through Google's documented OpenAI-compatible endpoint. No native Gemini/Vertex API is used or claimed. Providers that cannot be initialised (e.g. missing API key) degrade gracefully to `None` and are skipped in the fallback chain.
@@ -297,7 +322,7 @@ A modular, opt-in **Provider Plugin System** that adds dynamic provider loading,
 | `ProviderHealth` | `providers/interface.py` | `status` (UNKNOWN/HEALTHY/DEGRADED/UNHEALTHY/DISABLED), `last_success`, `last_error`, `error_count`, `success_count`, `avg_response_time_ms` |
 | `ProviderInfo` | `providers/interface.py` | Registry record: name, display name, description, capability, `requires_api_key`, enabled, configurable, health, fallback_for |
 | `ProviderManager` | `providers/manager.py` | Central registry, dynamic loading, enable/disable, capability detection, health monitoring, fallback chain, `call()` wrapper |
-| Adapters | `providers/{local,openai,gemini,mock}_provider.py` | Built-in adapters wrapping existing providers |
+| Adapters | `providers/{local,openai,gemini,jules,mock}_provider.py` | Built-in adapters wrapping existing providers (Jules added in v1.1.0) |
 
 ### Built-in providers
 

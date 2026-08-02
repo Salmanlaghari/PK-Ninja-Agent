@@ -2,6 +2,43 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — Jules Provider Integration
+
+First-class integration of the official Jules asynchronous coding-agent REST API as a production AI provider, registered alongside the existing local, Gemini, and mock providers.
+
+### Added
+- **JulesProvider** (`backend/ai_provider.py`) — full rewrite of the previous Jules stub. Implements the official Jules async REST API (`https://jules.googleapis.com/v1alpha`) with `x-goog-api-key` header authentication (not Bearer). Implements the complete session lifecycle: create session → poll to terminal → auto-approve plan → collect activities/artifacts → parse unidiff edits. Includes HTTP retry with exponential backoff (transient 429/5xx and network errors only), timeout-bounded polling, structured diagnostics counters, and a synchronous bridge (`generate`, `plan`, `edit`, `analyze_error`, `stream_chat`) so Jules works with PK Ninja Agent's synchronous provider protocol. Streaming is emulated via ~12-word chunked delivery because the Jules API exposes no SSE endpoint.
+- **JulesAdapter** (`providers/jules_provider.py`) — provider-plugin adapter following the established GeminiAdapter pattern. Registered in the Provider Manager as a first-class builtin with advertised `ProviderCapability(streaming=True, tool_calling=True, code_editing=True)`. Delegates `plan`/`edit`/`analyze_error`/`stream_chat` to the inner `JulesProvider` and implements `chat`/`review`/`summarize` via `generate`.
+- **Jules configuration** (`backend/config.py`) — new settings: `jules_api_key` (`JULES_API_KEY`), `jules_base_url` (default `https://jules.googleapis.com/v1alpha`), `jules_poll_interval_seconds` (3.0), `jules_poll_timeout_seconds` (600), `jules_max_retries` (3). Added `Settings.effective_jules_key()` which resolves `jules_api_key → ai_api_key → gemini_api_key`.
+- **`.env.example`** — documented Jules configuration section.
+- **`tests/test_jules_provider.py`** — 41 new tests covering init/auth/header (x-goog-api-key, key fallback), HTTP layer (create session, retry on 429, retry exhaustion, non-retryable 403 fast-fail, network-error retry), polling (immediate completion, auto-approve plan, failed state, timeout), artifact collection (agent text, changeSet unidiff edits), synchronous bridge (generate, stream-chat chunk emulation, plan, edit, analyze_error), unidiff parsing (single/multiple files, empty diff, `b/` prefix stripping), message-to-prompt flattening, JulesAdapter (import, no-key init-error capture, with-key init), manager integration (registry, capability, instance build, no-secret leak guard), and factory (fallback to LocalProvider without key, returns JulesProvider with key, no key leak in provider_status).
+- **`JULES_API_RESEARCH.md`** — research notes documenting the official Jules API surface.
+
+### Changed
+- Version bumped from 1.0.2 to 1.1.0 across `backend/main.py` (FastAPI app, startup log, `/health` endpoint), `backend/metrics.py` (version field), `backend/release_checks.py` (docstring + version field), `tests/test_release_prep.py` (2 assertions), `tests/test_dashboard.py` (1 assertion).
+- `providers/__init__.py` — exported `JulesAdapter`, bumped provider-package `__version__` from `0.6.0` to `0.7.0`.
+- `providers/manager.py` — registered Jules in `_register_builtins()` with display name, description, capability, and `requires_api_key=True`.
+- `backend/ai_provider.py` `get_provider()` factory — the `jules` branch now uses `settings.effective_jules_key()` and constructs the official-API `JulesProvider`.
+- `tests/conftest.py` — pops `JULES_API_KEY` from the environment for test isolation.
+- `README.md` — new "Jules Integration (v1.1.0)" section, updated providers tree, env config, adapter table, and test count.
+- `API.md` — version references to 1.1.0, expanded Providers section with full Jules documentation (configuration, request/response lifecycle, retry/error handling), and provider Pydantic models.
+- `ROADMAP.md` — Jules integration marked as delivered in v1.1.0.
+- `BUILD_REPORT.md` — v1.1.0 build report.
+- `.gitignore` — added entries for agent working artifacts (`outputs/`, `tmp/`, `summarized_conversations/`, `.pytest_cache/`, `providers/__pycache__/`, `agents/__pycache__/`).
+
+### Security
+- Jules API key is never logged, never returned by any endpoint, and excluded from `diagnostics_summary()` / `diagnostics()` / provider-manager status (verified by a no-secret-leak test guard).
+- Non-retryable HTTP errors (401/403/404/422) fail immediately without retrying, preventing credential brute-forcing loops.
+- Test isolation: `JULES_API_KEY` is removed from the environment in `conftest.py` so no provider test accidentally hits the live Jules API.
+
+### Tests
+- **584 tests, 0 failures** (543 existing + 41 new Jules tests).
+
+### Manual configuration
+To activate the Jules provider in a deployment, set `JULES_API_KEY` (or reuse `AI_API_KEY` / `GEMINI_API_KEY`) in the environment, then enable and activate the `jules` provider via `POST /api/providers/enable` and `POST /api/providers/active` (or the Provider Dashboard). No code changes are required.
+
+---
+
 ## [1.0.1] — Public Deployment
 
 Deployment-ready release with multi-platform deployment support, production configuration templates, and comprehensive deployment documentation.
