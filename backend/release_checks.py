@@ -111,9 +111,17 @@ def system_health(settings: Any) -> Dict[str, Any]:
         overall = "degraded"
     else:
         overall = "ok"
+    # Derive the version from the FastAPI app so it never drifts from the
+    # value declared in backend/main.py (app = FastAPI(version=...)).
+    version = "1.1.1"
+    try:
+        from main import app as _app  # type: ignore[import-not-found]
+        version = getattr(_app, "version", version)
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "status": overall,
-        "version": "1.1.0",
+        "version": version,
         "environment": getattr(settings, "app_env", "development"),
         "components": checks,
     }

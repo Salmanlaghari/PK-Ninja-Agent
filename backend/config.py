@@ -25,6 +25,33 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def is_serverless() -> bool:
+    """Detect whether we are running on a serverless platform (e.g. Vercel).
+
+    Vercel's Python runtime sets ``VERCEL=1`` in the build/runtime environment.
+    We also treat ``AWS_LAMBDA_FUNCTION_NAME`` and a read-only current working
+    directory as serverless signals so the app degrades gracefully on any
+    ephemeral, read-only-filesystem host (Vercel, AWS Lambda, etc.).
+    """
+    if os.environ.get("VERCEL") == "1":
+        return True
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return True
+    if os.environ.get("PK_NINJA_SERVERLESS", "").lower() in ("1", "true", "yes"):
+        return True
+    # Fallback heuristic: if the CWD is not writable we are almost certainly on
+    # a read-only serverless filesystem, so redirect mutable state to /tmp.
+    try:
+        rw = os.access(".", os.W_OK)
+    except OSError:
+        rw = False
+    return not rw
+
+
+# The only writable directory on Vercel/AWS-Lambda serverless runtimes.
+_TMP_ROOT = Path(os.environ.get("TMPDIR", "/tmp"))
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -170,13 +197,33 @@ class Settings(BaseSettings):
 
     @property
     def workspace_root_path(self) -> Path:
-        p = Path(self.workspace_root).resolve()
-        p.mkdir(parents=True, exist_ok=True)
+        p = Path(self.workspace_root)
+        if is_serverless():
+            # The project root is read-only on Vercel; the only writable
+            # directory is /tmp. Keep workspaces there so the app boots and
+            # serves requests instead of crashing on mkdir().
+            p = _TMP_ROOT / "pk_ninja_workspaces"
+        p = p.resolve()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Last-resort: if even /tmp is unavailable, fall back to an
+            # in-memory-ish path; endpoints that need disk will degrade.
+            pass
         return p
 
     @property
     def db_path(self) -> Path:
-        return Path(self.database_path).resolve()
+        p = Path(self.database_path)
+        if is_serverless():
+            # SQLite "can't be used with Vercel" per the Vercel KB because the
+            # filesystem is ephemeral/read-only. We still create the DB file
+            # under /tmp so the app boots and stateless endpoints (/health,
+            # /api/auth/status, the dashboard UI) work. Long-lived task state
+            # is inherently ephemeral on serverless and should move to a
+            # managed store for production, but /tmp lets the app run.
+            p = _TMP_ROOT / "pk_ninja.db"
+        return p.resolve()
 
     def github_repo_full(self) -> Optional[str]:
         if self.github_owner and self.github_repo:

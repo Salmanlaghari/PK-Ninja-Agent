@@ -113,7 +113,12 @@ async def _db() -> aiosqlite.Connection:
     settings = get_settings()
     global _DB_PATH
     _DB_PATH = settings.db_path
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only filesystem (serverless) — the parent may already exist.
+        # If it truly doesn't, aiosqlite.connect below will raise per-request.
+        pass
     conn = await aiosqlite.connect(str(_DB_PATH))
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode=WAL")
@@ -303,7 +308,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="1.1.0")
+app = FastAPI(title="PK Ninja Agent", version="1.1.1")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
@@ -686,7 +691,15 @@ _init_scheduler_from_settings()
 
 @app.on_event("startup")
 async def _startup() -> None:
-    await init_db()
+    # Initialise the SQLite database. On serverless platforms (Vercel) the
+    # filesystem is read-only/ephemeral and DB init can fail; we must NEVER
+    # let that crash the lifespan startup or every request returns
+    # FUNCTION_INVOCATION_FAILED. Degrade gracefully: stateless endpoints
+    # (/health, /api/auth/status, the dashboard UI) keep working.
+    try:
+        await init_db()
+    except Exception as exc:  # noqa: BLE001 — never block startup on DB
+        log.warning("Database init skipped (running in serverless/read-only mode?): %s", exc)
     s = get_settings()
     env = getattr(s, "app_env", "development")
     # Production-safety warnings (non-blocking).
@@ -708,7 +721,7 @@ async def _startup() -> None:
                 log.info("startup check: %s — %s", chk.get("name"), chk.get("detail"))
     except Exception as exc:  # noqa: BLE001 — never block startup on checks
         log.warning("startup checks skipped: %s", exc)
-    log.info("PK Ninja Agent v1.1.0 started (env=%s). DB at %s",
+    log.info("PK Ninja Agent v1.1.1 started (env=%s). DB at %s",
              env, s.db_path)
     # v0.8.0 — Autonomous Execution Engine: initialise the scheduler + worker
     # when opted in. When disabled (default), the original fire-and-forget
@@ -737,7 +750,7 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "1.1.0"}
+    return {"status": "ok", "version": "1.1.1"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────

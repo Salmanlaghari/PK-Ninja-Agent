@@ -38,8 +38,17 @@ def register_shutdown_handlers(app: Any) -> None:
         if loop and loop.is_running():
             asyncio.ensure_future(_graceful_shutdown(app))
 
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
+    # Registering signal handlers only works in the main thread of the main
+    # interpreter. On serverless platforms (Vercel, AWS Lambda) the module is
+    # frequently imported in a worker thread, where signal.signal() raises
+    # ValueError. Guard it so import never crashes the function.
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _signal_handler)
+        except (ValueError, OSError):
+            # Not in the main thread / signals unsupported — skip silently.
+            # The lifespan shutdown handler below still drains resources.
+            pass
 
     @app.on_event("startup")
     async def _capture_loop():
