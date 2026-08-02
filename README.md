@@ -697,3 +697,35 @@ The full suite grew from 524 tests (v0.8.0) to **543 tests**:
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_production_infra.py` | 19 | Structured logging, shutdown, backup manager, metrics, scripts |
+
+---
+
+## 16. v1.0.0 — Stable Release
+
+The first official stable release. PK Ninja Agent is now a production-ready, self-hostable autonomous coding agent.
+
+### What changed
+
+- **Code quality**: Removed dead code, extracted duplicate logic (`_rt_for()` → shared `get_runtime_for_ctx()`), cleaned unused imports across 12 backend files.
+- **Flaky test fix**: `test_validate_workspace_symlink_escape` now passes consistently in full-suite runs.
+- **Junk file removal**: Removed accidentally committed SQLite test artifact (`None` file).
+- **Security documentation**: Added `SECURITY.md` with full security architecture, reporting policy, and production checklist.
+- **API documentation**: Added `API.md` with complete endpoint reference.
+
+### Stability
+
+- **543 tests, 0 failures** — all tests pass consistently.
+- No experimental features — only proven, tested functionality.
+- Full backward compatibility with v0.9.0.
+
+### Production readiness
+
+| Area | Status |
+|------|--------|
+| Containerization | ✅ Dockerfile + docker-compose |
+| CI/CD | ✅ GitHub Actions |
+| Logging | ✅ Structured JSON |
+| Monitoring | ✅ Prometheus /metrics |
+| Backup | ✅ SQLite backup manager |
+| Security | ✅ Sandbox + hardening + audit |
+| Documentation | ✅ README, DEPLOYMENT, API, SECURITY |

@@ -21,6 +21,7 @@ from agents.base import (
     AgentResult,
     AgentRole,
     BaseAgent,
+    get_runtime_for_ctx,
 )
 from agents.registry import register_agent
 
@@ -63,7 +64,7 @@ class TerminalAgent(BaseAgent):
                 warning = decision.warning if decision.allowed else None
                 ctx.emit_event("command_started", f"$ {cmd}",
                                warning=warning or "", agent=AgentRole.terminal.value)
-                result = run_command(cmd, ws, rt=_rt_for(ctx))
+                result = run_command(cmd, ws, rt=get_runtime_for_ctx(ctx))
                 ctx.emit_event(
                     "command_output",
                     result.stdout or result.stderr or "(no output)",
@@ -124,21 +125,4 @@ class TerminalAgent(BaseAgent):
         return cmds
 
 
-def _rt_for(ctx: AgentContext):
-    """Return a runtime-like object so run_command can store the live proc.
 
-    The agent module's TaskRuntime has current_proc + current_proc_lock which
-    allow cancellation to kill the running process. We expose a minimal shim
-    that mirrors that interface if the real runtime is available, else None.
-    """
-    try:
-        import threading
-
-        from agent import get_runtime
-
-        rt = get_runtime(ctx.task_id)
-        if rt is not None:
-            return rt
-    except Exception:
-        pass
-    return None

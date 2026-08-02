@@ -467,7 +467,9 @@ class TestSecurityAPI:
         """A symlink escaping the workspace should make validation fail."""
         import importlib
         from config import get_settings
-        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "wsroot"))
+        wsroot = tmp_path / "wsroot"
+        wsroot.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("WORKSPACE_ROOT", str(wsroot))
         get_settings.cache_clear()
         import main as _main
         importlib.reload(_main)
@@ -475,13 +477,16 @@ class TestSecurityAPI:
         client = TestClient(_main.app)
 
         resp = client.post("/api/workspaces", json={"name": "sectest2"})
-        ws_path = tmp_path / "wsroot" / "sectest2"
+        ws_path = wsroot / "sectest2"
+        # Ensure workspace directory exists (API may create it, or we create it)
         ws_path.mkdir(parents=True, exist_ok=True)
         (ws_path / "main.py").write_text("ok")
         # Symlink to a file outside the workspace root
         outside = tmp_path / "outside_secret.txt"
         outside.write_text("secret")
-        os.symlink(outside, ws_path / "escape.txt")
+        symlink_target = ws_path / "escape.txt"
+        if not symlink_target.exists():
+            os.symlink(outside, symlink_target)
 
         r = client.get("/api/security/workspace/sectest2")
         assert r.status_code == 200

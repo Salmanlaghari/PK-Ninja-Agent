@@ -19,6 +19,7 @@ from agents.base import (
     AgentResult,
     AgentRole,
     BaseAgent,
+    get_runtime_for_ctx,
 )
 from agents.registry import register_agent
 
@@ -60,7 +61,7 @@ class TestingAgent(BaseAgent):
                        agent=AgentRole.testing.value)
         try:
             decision = validate_command(cmd)
-            result = run_command(cmd, ws, rt=_rt_for(ctx))
+            result = run_command(cmd, ws, rt=get_runtime_for_ctx(ctx))
         except TerminalError as exc:
             ctx.emit_event("error", f"Testing command rejected: {exc}", command=cmd,
                            agent=AgentRole.testing.value)
@@ -204,13 +205,4 @@ def _is_local(provider: Any) -> bool:
         return False
 
 
-def _rt_for(ctx: AgentContext):
-    try:
-        from agent import get_runtime
 
-        rt = get_runtime(ctx.task_id)
-        if rt is not None:
-            return rt
-    except Exception:
-        pass
-    return None
