@@ -99,6 +99,21 @@ async def build_user_settings(settings: Settings, user: Any) -> Settings:
         overrides["ai_api_key"] = api_key
     if github_token:
         overrides["github_token"] = github_token
+
+    # v1.3.0: Inject stored github_owner/github_repo so the agent can
+    # auto-clone the user's repo without server env vars.
+    try:
+        from settings_store import get_settings_for_user
+        prefs = await get_settings_for_user(settings, user)
+        g_owner = (prefs.get("github_owner") or "").strip()
+        g_repo = (prefs.get("github_repo") or "").strip()
+        if g_owner:
+            overrides["github_owner"] = g_owner
+        if g_repo:
+            overrides["github_repo"] = g_repo
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not read github owner/repo prefs: %s", exc)
+
     # Also mirror the github token into os.environ so subprocesses (gh CLI,
     # git push) inherit it for the duration of the task.
     if github_token:

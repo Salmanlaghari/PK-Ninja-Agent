@@ -194,6 +194,171 @@ def prepare_pull_request(workspace: Workspace, *,
     }
 
 
+# ── GitHub API exploration tools (v1.3.0) ─────────────────────────────
+# These functions let the agent (and the API endpoints) query GitHub
+# directly via the ``gh`` CLI using the stored token. They power "show me
+# my repo list", "list issues", "list PRs", etc.
+
+def list_user_repos(settings: Optional[Settings] = None,
+                    limit: int = 30) -> list:
+    """List the authenticated user's repositories.
+
+    Uses ``gh repo list`` which reads ``GH_TOKEN`` / ``GITHUB_TOKEN`` from
+    the environment. Returns a list of dicts with name, full_name, private,
+    description, default_branch, updated_at, and html_url.
+    """
+    res = _gh([
+        "repo", "list", "--limit", str(limit),
+        "--json", "name,nameWithOwner,isPrivate,description,"
+                  "defaultBranchRef,updatedAt,url",
+    ], timeout=30)
+    if not res.success:
+        raise GitHubError(f"gh repo list failed: {res.stderr.strip()[:300]}")
+    try:
+        data = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        data = []
+    repos = []
+    for item in data:
+        repos.append({
+            "name": item.get("name", ""),
+            "full_name": item.get("nameWithOwner", ""),
+            "private": bool(item.get("isPrivate", False)),
+            "description": item.get("description") or "",
+            "default_branch": (item.get("defaultBranchRef") or {}).get("name", "main"),
+            "updated_at": item.get("updatedAt", ""),
+            "html_url": item.get("url", ""),
+        })
+    return repos
+
+
+def list_repo_issues(owner: str, repo: str,
+                     state: str = "open",
+                     limit: int = 20,
+                     settings: Optional[Settings] = None) -> list:
+    """List issues for ``owner/repo``.
+
+    ``state`` can be ``open``, ``closed``, or ``all``.
+    """
+    full = f"{owner}/{repo}"
+    res = _gh([
+        "issue", "list", "--repo", full,
+        "--state", state, "--limit", str(limit),
+        "--json", "number,title,state,author,createdAt,updatedAt,url,labels",
+    ], timeout=30)
+    if not res.success:
+        raise GitHubError(f"gh issue list failed: {res.stderr.strip()[:300]}")
+    try:
+        data = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        data = []
+    issues = []
+    for item in data:
+        author = item.get("author") or {}
+        issues.append({
+            "number": item.get("number", 0),
+            "title": item.get("title", ""),
+            "state": item.get("state", ""),
+            "author": author.get("login", "") if isinstance(author, dict) else str(author),
+            "created_at": item.get("createdAt", ""),
+            "updated_at": item.get("updatedAt", ""),
+            "url": item.get("url", ""),
+            "labels": [l.get("name", "") if isinstance(l, dict) else str(l)
+                       for l in (item.get("labels") or [])],
+        })
+    return issues
+
+
+def list_repo_prs(owner: str, repo: str,
+                  state: str = "open",
+                  limit: int = 20,
+                  settings: Optional[Settings] = None) -> list:
+    """List pull requests for ``owner/repo``.
+
+    ``state`` can be ``open``, ``closed``, ``merged``, or ``all``.
+    """
+    full = f"{owner}/{repo}"
+    res = _gh([
+        "pr", "list", "--repo", full,
+        "--state", state, "--limit", str(limit),
+        "--json", "number,title,state,author,headRefName,baseRefName,"
+                  "createdAt,updatedAt,url,isDraft,additions,deletions",
+    ], timeout=30)
+    if not res.success:
+        raise GitHubError(f"gh pr list failed: {res.stderr.strip()[:300]}")
+    try:
+        data = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        data = []
+    prs = []
+    for item in data:
+        author = item.get("author") or {}
+        prs.append({
+            "number": item.get("number", 0),
+            "title": item.get("title", ""),
+            "state": item.get("state", ""),
+            "author": author.get("login", "") if isinstance(author, dict) else str(author),
+            "head_branch": item.get("headRefName", ""),
+            "base_branch": item.get("baseRefName", ""),
+            "created_at": item.get("createdAt", ""),
+            "updated_at": item.get("updatedAt", ""),
+            "url": item.get("url", ""),
+            "is_draft": bool(item.get("isDraft", False)),
+            "additions": item.get("additions", 0),
+            "deletions": item.get("deletions", 0),
+        })
+    return prs
+
+
+def get_repo_details(owner: str, repo: str,
+                     settings: Optional[Settings] = None) -> dict:
+    """Get detailed info about a single repo."""
+    full = f"{owner}/{repo}"
+    res = _gh([
+        "repo", "view", full, "--json",
+        "name,nameWithOwner,isPrivate,description,defaultBranchRef,"
+        "url,stargazerCount,forkCount,primaryLanguage,createdAt,updatedAt",
+    ], timeout=30)
+    if not res.success:
+        raise GitHubError(f"gh repo view failed: {res.stderr.strip()[:300]}")
+    try:
+        data = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    lang = data.get("primaryLanguage") or {}
+    return {
+        "name": data.get("name", ""),
+        "full_name": data.get("nameWithOwner", full),
+        "private": bool(data.get("isPrivate", False)),
+        "description": data.get("description") or "",
+        "default_branch": (data.get("defaultBranchRef") or {}).get("name", "main"),
+        "html_url": data.get("url", ""),
+        "stars": data.get("stargazerCount", 0),
+        "forks": data.get("forkCount", 0),
+        "language": lang.get("name", "") if isinstance(lang, dict) else str(lang),
+        "created_at": data.get("createdAt", ""),
+        "updated_at": data.get("updatedAt", ""),
+    }
+
+
+def list_repo_branches(owner: str, repo: str,
+                       limit: int = 30,
+                       settings: Optional[Settings] = None) -> list:
+    """List branches for ``owner/repo``."""
+    full = f"{owner}/{repo}"
+    res = _gh([
+        "api", f"repos/{full}/branches",
+        "--paginate", "--jq",
+        f'[.[:{limit}][] | {{"name": .name, "protected": .protected}}]',
+    ], timeout=30)
+    if not res.success:
+        raise GitHubError(f"gh api branches failed: {res.stderr.strip()[:300]}")
+    try:
+        return json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+
+
 def create_pull_request(workspace: Workspace, *,
                         title: Optional[str] = None,
                         body: Optional[str] = None,

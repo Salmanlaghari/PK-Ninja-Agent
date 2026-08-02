@@ -406,6 +406,7 @@ const Settings = (() => {
     const login = $("gh-login");
     const avatar = $("gh-avatar");
     const disconnect = $("gh-disconnect");
+    const repoDisplay = $("gh-repo-display");
     if (!dot) return;
     if (_ghStatus && _ghStatus.connected) {
       dot.className = "apikey-dot ok";
@@ -418,12 +419,56 @@ const Settings = (() => {
         avatar.hidden = true;
       }
       if (disconnect) disconnect.hidden = false;
+      if (repoDisplay) {
+        repoDisplay.hidden = false;
+        if (_ghStatus.repo) {
+          repoDisplay.textContent = "Repo: " + _ghStatus.repo;
+        } else {
+          repoDisplay.textContent = "No repo bound — add owner/repo above.";
+        }
+      }
     } else {
       dot.className = "apikey-dot none";
       text.textContent = "Not connected";
       if (login) login.textContent = "";
       if (avatar) avatar.hidden = true;
       if (disconnect) disconnect.hidden = true;
+      if (repoDisplay) {
+        repoDisplay.hidden = true;
+        repoDisplay.textContent = "";
+      }
+    }
+  }
+
+  async function loadGithubRepos() {
+    const list = $("gh-repo-list");
+    const msg = $("gh-status");
+    if (!list) return;
+    list.innerHTML = '<div class="gh-loading">Loading repositories...</div>';
+    try {
+      const r = await fetch("/api/github/repos");
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        list.innerHTML = '<div class="gh-error">' +
+          (err.detail || "Failed to load repos. Make sure GitHub is connected.") +
+          "</div>";
+        return;
+      }
+      const data = await r.json();
+      const repos = data.repos || [];
+      if (repos.length === 0) {
+        list.innerHTML = '<div class="gh-empty">No repositories found.</div>';
+        return;
+      }
+      list.innerHTML = repos.map(function(r) {
+        return '<div class="gh-repo-item" data-fullname="' + (r.full_name || "") + '">' +
+          '<span class="gh-repo-name">' + (r.full_name || r.name || "") + "</span>" +
+          (r.private ? '<span class="gh-repo-badge">private</span>' : "") +
+          '<span class="gh-repo-desc">' + (r.description || "").substring(0, 60) + "</span>" +
+          "</div>";
+      }).join("");
+    } catch (e) {
+      list.innerHTML = '<div class="gh-error">Error: ' + (e.message || "unknown") + "</div>";
     }
   }
 
@@ -653,6 +698,9 @@ const Settings = (() => {
     if (bAkRemove) bAkRemove.addEventListener("click", removeApiKey);
     if (bGhConnect) bGhConnect.addEventListener("click", connectGithub);
     if (bGhDisconnect) bGhDisconnect.addEventListener("click", disconnectGithub);
+    // v1.3.0: Load repos button.
+    const bGhRepos = $("gh-load-repos");
+    if (bGhRepos) bGhRepos.addEventListener("click", loadGithubRepos);
     // Enter key on the API key input saves.
     const akInput = $("set-apikey");
     if (akInput) akInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveApiKey(); });
@@ -668,7 +716,7 @@ const Settings = (() => {
 
   return { init, load, save, reset, open, close, applyToForm,
            renderProviderCards, renderApikeyStatus, renderGhStatus,
-           loadApikeyStatus, loadGhStatus };
+           loadApikeyStatus, loadGhStatus, loadGithubRepos };
 })();
 
 
