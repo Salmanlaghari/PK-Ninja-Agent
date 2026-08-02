@@ -70,8 +70,10 @@ async def ensure_sessions_schema(conn: aiosqlite.Connection) -> None:
 
 
 async def _connect(db_path: Path) -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(str(db_path))
-    conn.row_factory = aiosqlite.Row
+    # Use the centralized, serverless-safe connector (WAL + busy_timeout +
+    # /tmp resolution) instead of a bare aiosqlite.connect().
+    from db import connect as _db_connect
+    conn = await _db_connect(db_path)
     await ensure_sessions_schema(conn)
     return conn
 

@@ -32,6 +32,13 @@ async def find_candidate_files(task_id: str, task_desc: str, db_path: str, ws: W
 
     async with aiosqlite.connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
+        # Apply serverless-safe PRAGMAs (busy_timeout etc.) on this connection
+        # too so concurrent reads never fail with "unable to open database".
+        for pragma in ("PRAGMA busy_timeout=30000", "PRAGMA temp_store=MEMORY"):
+            try:
+                await conn.execute(pragma)
+            except Exception:
+                pass
 
         # Match paths containing keywords
         for kw in keywords:

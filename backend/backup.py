@@ -58,9 +58,13 @@ class BackupManager:
         backup_path = self.backup_dir / backup_name
 
         try:
-            # Use SQLite online backup API (safe for concurrent reads)
-            source = sqlite3.connect(str(self.db_path))
-            dest = sqlite3.connect(str(backup_path))
+            # Use SQLite online backup API (safe for concurrent reads).
+            # Both connections use the centralized serverless-safe connector
+            # (busy_timeout + temp_store=MEMORY) so a concurrent writer can't
+            # make the backup fail with "database is locked".
+            from db import connect_sync as _db_connect_sync
+            source = _db_connect_sync(self.db_path)
+            dest = sqlite3.connect(str(backup_path), timeout=30.0)
             source.backup(dest)
             source.close()
             dest.close()

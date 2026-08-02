@@ -87,7 +87,7 @@ class TestSystemHealth:
         for k in ["status", "version", "environment", "components", "startup_checks"]:
             assert k in d
         assert d["status"] in ("ok", "degraded", "down", "unknown")
-        assert d["version"] == "1.4.0"
+        assert d["version"] == "1.5.0"
         assert isinstance(d["components"], list)
 
     def test_system_health_components_detail(self, monkeypatch):

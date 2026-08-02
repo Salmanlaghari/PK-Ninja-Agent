@@ -1,0 +1,28 @@
+{
+  "buildCommand": null,
+  "installCommand": "pip install -r requirements.txt",
+  "framework": null,
+  "outputDirectory": ".",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "includeFiles": "backend/**,frontend/**,requirements.txt"
+    }
+  },
+  "rewrites": [
+    { "source": "/((?!.*\\.).*)", "destination": "/api/index" },
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
+  ],
+  "concurrency": {
+    "limit": 5
+  }
+}

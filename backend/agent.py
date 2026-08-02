@@ -622,6 +622,9 @@ class Agent:
                 if not res.success:
                     self.emit(EventType.error,
                               f"Clone/pull failed: {res.stderr.strip()[:300]}")
+                    self.emit(EventType.info,
+                              "Continuing in local-only mode. The agent can still "
+                              "run tasks; repository features will be limited.")
                 else:
                     self.emit(EventType.info,
                               f"Repository cloned into workspace "
@@ -631,8 +634,13 @@ class Agent:
                           f"GitHub unavailable: {exc}. "
                           "Continuing with empty workspace.")
         else:
+            # Give the user actionable guidance instead of a bare info line so
+            # they know exactly how to enable repo-aware mode on Vercel/local.
             self.emit(EventType.info,
-                      "No GitHub repo configured; running in local-only workspace.")
+                      "No GitHub repo configured; running in local-only workspace. "
+                      "To enable repository features, set the GITHUB_REPOSITORY "
+                      "(owner/repo) and GITHUB_TOKEN environment variables, or "
+                      "connect your GitHub account in Settings.")
 
         self._check_cancel(rt)
 
@@ -653,9 +661,10 @@ class Agent:
         try:
             import asyncio
             import aiosqlite
+            from db import connect as _db_connect
             from indexing import index_workspace
             async def _run_idx():
-                async with aiosqlite.connect(str(self.settings.db_path)) as conn:
+                async with await _db_connect(self.settings.db_path) as conn:
                     # Ensure tables exist
                     await conn.executescript(
                         "CREATE TABLE IF NOT EXISTS repo_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, mtime REAL NOT NULL, indexed_at TEXT NOT NULL, UNIQUE(task_id, path));"
@@ -725,9 +734,10 @@ class Agent:
         try:
             import asyncio
             import aiosqlite
+            from db import connect as _db_connect
             from indexing import get_project_map
             async def _get_map():
-                async with aiosqlite.connect(str(self.settings.db_path)) as conn:
+                async with await _db_connect(self.settings.db_path) as conn:
                     return await get_project_map(self.task_id, ws, conn)
             try:
                 project_map_str = asyncio.run(_get_map())
@@ -1028,11 +1038,12 @@ class Agent:
             return ws.search_files(args.get("pattern", "*"), args.get("text"))
         elif name == "search_symbols":
             import aiosqlite
+            from db import connect as _db_connect
             from indexing import search_symbols
             try:
                 import asyncio
                 async def _run_search():
-                    async with aiosqlite.connect(str(ws.settings.db_path)) as conn:
+                    async with await _db_connect(ws.settings.db_path) as conn:
                         return await search_symbols(self.task_id, args.get("query", ""), conn)
                 try:
                     return asyncio.run(_run_search())
@@ -1079,11 +1090,12 @@ class Agent:
             return {"success": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
         elif name == "indexing":
             import aiosqlite
+            from db import connect as _db_connect
             from indexing import index_workspace
             try:
                 import asyncio
                 async def _run_idx():
-                    async with aiosqlite.connect(str(self.settings.db_path)) as conn:
+                    async with await _db_connect(self.settings.db_path) as conn:
                         return await index_workspace(self.task_id, ws, conn)
                 try:
                     return asyncio.run(_run_idx())

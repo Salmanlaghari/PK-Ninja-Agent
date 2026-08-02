@@ -48,7 +48,7 @@ from agent import (BUS, cancel_task, get_runtime,
 from ai_provider import provider_status
 from auth import (AuthError, InvalidTokenError, User,
                   get_auth_service)
-from config import get_settings
+from config import get_settings, is_serverless
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
 from secret_store import (delete_secret, get_secret, has_secret, list_secrets,
@@ -119,15 +119,10 @@ async def _db() -> aiosqlite.Connection:
     settings = get_settings()
     global _DB_PATH
     _DB_PATH = settings.db_path
-    try:
-        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # Read-only filesystem (serverless) — the parent may already exist.
-        # If it truly doesn't, aiosqlite.connect below will raise per-request.
-        pass
-    conn = await aiosqlite.connect(str(_DB_PATH))
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA journal_mode=WAL")
+    # Use the centralized serverless-safe connector (WAL + busy_timeout +
+    # temp_store=MEMORY + parent-dir create + DB_PATH env override).
+    from db import connect as _db_connect
+    conn = await _db_connect(_DB_PATH)
     # Ensure schema exists on every connection (idempotent + defensive so the
     # app works even if the startup hook hasn't run yet, e.g. under reload).
     await conn.executescript(_SCHEMA_SQL)
@@ -314,7 +309,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="1.4.0")
+app = FastAPI(title="PK Ninja Agent", version="1.5.0")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
@@ -1081,7 +1076,36 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "1.4.0"}
+    return {"status": "ok", "version": "1.5.0"}
+
+
+@app.get("/api/health")
+async def api_health() -> dict:
+    """Deep health check — verifies the SQLite DB can actually be opened.
+
+    Vercel (or any uptime monitor) can poll this endpoint to confirm the
+    deployment is healthy end-to-end: it opens a real connection via the
+    centralized ``db.connect`` helper (WAL + busy_timeout + /tmp resolution)
+    and runs a trivial query. If the DB cannot be opened on the serverless
+    filesystem, this returns ``status=degraded`` with the error instead of a
+    500, so monitors can distinguish "app up, DB broken" from a hard crash.
+    """
+    checks: dict = {"version": getattr(app, "version", "unknown")}
+    try:
+        from db import connect as _db_connect
+        conn = await _db_connect()
+        cur = await conn.execute("SELECT 1")
+        (one,) = await cur.fetchone()
+        await conn.close()
+        checks["database"] = "ok" if one == 1 else "degraded"
+        checks["serverless"] = is_serverless()
+        repo = get_settings().github_repo_full()
+        checks["github_repo"] = repo or "not-configured"
+        checks["status"] = "ok" if one == 1 else "degraded"
+    except Exception as exc:  # noqa: BLE001 — health must never 500
+        checks["database"] = f"error: {exc}"
+        checks["status"] = "degraded"
+    return checks
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────
