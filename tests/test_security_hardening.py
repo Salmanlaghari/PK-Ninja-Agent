@@ -476,17 +476,21 @@ class TestSecurityAPI:
         from fastapi.testclient import TestClient
         client = TestClient(_main.app)
 
+        # Create workspace via API (may already exist from prior test)
         resp = client.post("/api/workspaces", json={"name": "sectest2"})
+        # Resolve the actual workspace path from the API
         ws_path = wsroot / "sectest2"
-        # Ensure workspace directory exists (API may create it, or we create it)
         ws_path.mkdir(parents=True, exist_ok=True)
         (ws_path / "main.py").write_text("ok")
         # Symlink to a file outside the workspace root
         outside = tmp_path / "outside_secret.txt"
         outside.write_text("secret")
         symlink_target = ws_path / "escape.txt"
-        if not symlink_target.exists():
-            os.symlink(outside, symlink_target)
+        if symlink_target.exists():
+            symlink_target.unlink()
+        os.symlink(outside, symlink_target)
+        # Verify symlink was created
+        assert symlink_target.is_symlink(), "Symlink was not created"
 
         r = client.get("/api/security/workspace/sectest2")
         assert r.status_code == 200

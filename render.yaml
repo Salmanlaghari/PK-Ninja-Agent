@@ -1,0 +1,40 @@
+# ── PK Ninja Agent — Render Blueprint ───────────────────────────────────
+# Deploy to Render: https://render.com/docs/blueprint-spec
+#
+# Usage:
+#   1. Push this file to your repo
+#   2. Go to render.com → New → Blueprint
+#   3. Connect your GitHub repo
+#   4. Render will auto-detect this file and create services
+
+services:
+  - type: web
+    name: pk-ninja-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    branch: main
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: AI_PROVIDER
+        value: local
+      - key: AUTH_ENABLED
+        value: "false"
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/data/pk_ninja.db
+      - key: WORKSPACE_ROOT
+        value: /opt/render/project/src/workspaces
+      - key: PYTHON_VERSION
+        value: "3.12"
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: pk-ninja-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

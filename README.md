@@ -729,3 +729,43 @@ The first official stable release. PK Ninja Agent is now a production-ready, sel
 | Backup | ✅ SQLite backup manager |
 | Security | ✅ Sandbox + hardening + audit |
 | Documentation | ✅ README, DEPLOYMENT, API, SECURITY |
+
+---
+
+## 17. v1.0.1 — Public Deployment
+
+Deployment-ready release with multi-platform deployment support.
+
+### Deploy Now
+
+**Render (Free, Recommended):**
+1. Push code to GitHub
+2. Go to render.com → New → Blueprint
+3. Connect repo → Render auto-detects `render.yaml`
+4. Click Apply → Live at `https://pk-ninja-agent.onrender.com`
+
+**Fly.io (Free):**
+```bash
+curl -L https://fly.io/install.sh | sh
+fly launch --copy-config
+fly deploy
+```
+
+**Docker (Any VPS):**
+```bash
+git clone https://github.com/Salmanlaghari/PK-Ninja-Agent.git
+cd PK-Ninja-Agent
+cp .env.production .env
+docker compose up -d
+```
+
+**GHCR:**
+```bash
+docker pull ghcr.io/salmanlaghari/pk-ninja-agent:1.0.1
+```
+
+### Files Added
+- `render.yaml` — Render Blueprint
+- `fly.toml` — Fly.io config
+- `.env.production` — Production env template
+- `DEPLOYMENT.md` — Comprehensive deployment guide

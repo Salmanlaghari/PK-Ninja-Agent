@@ -1,216 +1,175 @@
-# Deployment Guide — PK Ninja Agent v0.9.0
+# Deployment Guide — PK Ninja Agent v1.0.1
 
-This guide covers deploying PK Ninja Agent in production, staging, and development environments.
+PK Ninja Agent is a FastAPI web application with SQLite persistence, WebSocket support, and a built-in frontend. It can be deployed to any platform that supports Docker containers.
 
 ---
 
-## Quick Start (Docker Compose)
+## Quick Deploy Options
 
-The fastest way to run PK Ninja Agent in production:
+### Option 1: Render (Recommended — Free Tier)
+
+1. **Push your code to GitHub**
+2. **Go to [render.com](https://render.com)** → New → Blueprint
+3. **Connect your GitHub repository** (`Salmanlaghari/PK-Ninja-Agent`)
+4. **Render auto-detects `render.yaml`** and creates the service
+5. **Click "Apply"** — deployment starts automatically
+6. **Your app is live** at `https://pk-ninja-agent.onrender.com`
+
+The `render.yaml` blueprint configures:
+- Docker-based deployment
+- Persistent disk for SQLite database
+- Health check at `/health`
+- Auto-deploy on push to `main`
+
+**Cost:** Free tier (750 hours/month, spins down after 15 min inactivity)
+
+### Option 2: Fly.io
 
 ```bash
-# Clone the repository
+# Install flyctl
+curl -L https://fly.io/install.sh | sh
+
+# Login
+fly auth login
+
+# Launch (uses fly.toml in repo)
+fly launch --copy-config
+
+# Set secrets (if needed)
+fly secrets set AI_API_KEY=your-key-here
+
+# Deploy
+fly deploy
+```
+
+**Cost:** Free tier (3 shared-cpu-1x VMs, 3GB persistent storage)
+
+### Option 3: Docker (Any VPS)
+
+```bash
+# Clone
 git clone https://github.com/Salmanlaghari/PK-Ninja-Agent.git
 cd PK-Ninja-Agent
 
-# Configure environment
-cp .env.example .env
-# Edit .env with your settings (see Configuration below)
+# Configure
+cp .env.production .env
+# Edit .env with your settings
 
-# Start with Docker Compose
+# Build and run
 docker compose up -d
 
 # Verify
 curl http://localhost:8000/health
 ```
 
-The application will be available at `http://localhost:8000` with nginx reverse proxy at port 80.
+**Cost:** VPS cost (DigitalOcean $6/mo, Hetzner $4/mo, etc.)
 
----
-
-## Docker
-
-### Build Image
+### Option 4: Docker Single Container
 
 ```bash
-docker build -t pk-ninja-agent .
-```
+# Pull from GHCR
+docker pull ghcr.io/salmanlaghari/pk-ninja-agent:1.0.1
 
-### Run Container
-
-```bash
+# Run
 docker run -d \
-  --name pk-ninja-agent \
+  --name pk-ninja \
   -p 8000:8000 \
-  --env-file .env \
   -v pk-data:/app/data \
   -v pk-workspaces:/app/workspaces \
-  pk-ninja-agent
-```
-
-### Health Check
-
-The container includes a built-in health check:
-```bash
-docker inspect --format='{{.State.Health.Status}}' pk-ninja-agent
+  -e APP_ENV=production \
+  -e AI_PROVIDER=local \
+  ghcr.io/salmanlaghari/pk-ninja-agent:1.0.1
 ```
 
 ---
 
-## Configuration
+## Environment Variables
 
-### Required Environment Variables
+### Required
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `AI_PROVIDER` | AI provider: `local`, `openai` | `local` |
-| `AI_API_KEY` | API key for non-local providers | (empty) |
-| `APP_ENV` | Environment: `development`, `staging`, `production` | `development` |
+| `APP_ENV` | Environment: `production`, `development` | `development` |
 
-### Production-Specific Variables
+### Optional — AI
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_API_KEY` | API key for non-local providers | (empty) |
+| `AI_MODEL` | Model name (e.g. `gpt-4o-mini`) | (empty) |
+| `AI_BASE_URL` | OpenAI-compatible base URL | (empty) |
+
+### Optional — GitHub
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITHUB_TOKEN` | GitHub personal access token | (empty) |
+| `GITHUB_OWNER` | GitHub username or org | (empty) |
+| `GITHUB_REPO` | GitHub repository name | (empty) |
+
+### Optional — Authentication
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `AUTH_ENABLED` | Enable authentication | `false` |
-| `AUTH_SECRET` | HMAC secret for session tokens | (random per-process) |
-| `DEBUG` | Enable debug mode | `false` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `LOG_FILE` | Log file path (JSON format in production) | (stdout only) |
-| `UVICORN_WORKERS` | Number of uvicorn workers | `1` |
+| `AUTH_SECRET` | HMAC secret for session tokens | (random) |
+| `AUTH_GUEST_ALLOWED` | Allow guest sessions | `true` |
+| `AUTH_GITHUB_ENABLED` | Allow GitHub login | `false` |
 
-### Autonomous Engine Variables
+### Optional — Storage
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_PATH` | SQLite database path | `./pk_ninja.db` |
+| `WORKSPACE_ROOT` | Workspace directory | `./workspaces` |
+
+### Optional — Scheduler
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SCHEDULER_ENABLED` | Enable task scheduler | `false` |
-| `WORKER_MAX_CONCURRENCY` | Max concurrent background tasks | `2` |
+| `WORKER_MAX_CONCURRENCY` | Max concurrent tasks | `2` |
+
+### Optional — Security
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `SECURITY_HARDENING_ENABLED` | Enable security pipeline | `false` |
-| `RECOVERY_AUTO_RESUME` | Auto-resume interrupted tasks | `false` |
+| `COMMAND_TIMEOUT_SECONDS` | Command timeout | `30` |
 
 ---
 
-## Startup Script
+## HTTPS Configuration
 
-The `scripts/start.sh` script validates the environment and starts the server:
+### Render
+HTTPS is automatic — Render provides free SSL certificates for all services.
 
+### Fly.io
+HTTPS is automatic — Fly provides free SSL certificates via Let's Encrypt.
+
+### Custom Domain (Render)
+1. Go to your service → Settings → Custom Domains
+2. Add your domain (e.g. `pk.yourdomain.com`)
+3. Add the CNAME record to your DNS: `pk.yourdomain.com CNAME pk-ninja-agent.onrender.com`
+4. SSL certificate is provisioned automatically
+
+### Custom Domain (Fly.io)
 ```bash
-APP_ENV=production \
-AUTH_ENABLED=true \
-AUTH_SECRET=your-secret-here \
-./scripts/start.sh
+fly certs add pk.yourdomain.com
+# Add the DNS records shown in the output
 ```
 
-The script:
-1. Validates Python version (3.10+)
-2. Checks required dependencies
-3. Runs production safety warnings
-4. Creates runtime directories
-5. Runs database migrations
-6. Starts uvicorn with configured options
-
----
-
-## Security Audit
-
-Run the security audit script before deploying:
-
+### Nginx + Certbot (Self-hosted)
 ```bash
-./scripts/audit.sh
-```
+# Install certbot
+apt install certbot python3-certbot-nginx
 
-This checks:
-- Dependency vulnerabilities (pip-audit)
-- Security scan (bandit)
-- Hardcoded secrets
-- Git .env tracking
-- Dangerous imports
+# Get certificate
+certbot --nginx -d pk.yourdomain.com
 
----
-
-## Database
-
-PK Ninja Agent uses SQLite for all persistence. The database file is at `DATABASE_PATH` (default: `./pk_ninja.db`).
-
-### Backup
-
-```python
-from backend.backup import BackupManager
-
-mgr = BackupManager(db_path="./pk_ninja.db", backup_dir="./backups")
-mgr.create_backup()           # Create a backup
-mgr.list_backups()            # List all backups
-mgr.cleanup_old_backups(keep=7)  # Keep only 7 most recent
-```
-
-Or via API (when enabled):
-```bash
-curl -X POST http://localhost:8000/api/backup
-```
-
-### Restore
-
-```python
-mgr.restore_backup("pk_ninja_20260802_120000.db", confirm=True)
-```
-
----
-
-## Monitoring
-
-### Health Endpoint
-
-```bash
-curl http://localhost:8000/health
-# {"status": "ok", "version": "0.9.0"}
-```
-
-### System Health (detailed)
-
-```bash
-curl http://localhost:8000/api/system/health
-```
-
-### Prometheus Metrics
-
-Install `prometheus_client` to enable:
-```bash
-pip install prometheus_client
-```
-
-Then scrape `http://localhost:8000/metrics`.
-
-### Structured Logging
-
-In production (`APP_ENV=production`), logs are emitted as JSON:
-```json
-{"timestamp": "2026-08-02T10:00:00+00:00", "level": "INFO", "logger": "pk_ninja.access", "message": "GET /health → 200 (2ms)", "request_id": "abc123", "method": "GET", "path": "/health", "status_code": 200, "duration_ms": 2.0}
-```
-
----
-
-## CI/CD
-
-### GitHub Actions
-
-The repository includes two workflows:
-
-**CI (`ci.yml`)** — Runs on every push/PR:
-- Tests on Python 3.10, 3.11, 3.12
-- Dependency audit (pip-audit)
-- Security scan (bandit)
-- Docker build verification
-- Lint (ruff)
-
-**Release (`release.yml`)** — Runs on version tags:
-- Full test suite
-- Docker image build + push to GHCR
-- GitHub Release creation
-
-### Creating a Release
-
-```bash
-git tag -a v0.9.0 -m "v0.9.0 — Production & Deployment"
-git push origin v0.9.0
+# Auto-renew
+certbot renew --dry-run
 ```
 
 ---
@@ -220,17 +179,40 @@ git push origin v0.9.0
 Before going live:
 
 - [ ] Set `APP_ENV=production`
-- [ ] Set `AUTH_ENABLED=true` and `AUTH_SECRET=<strong-secret>`
 - [ ] Set `DEBUG=false`
-- [ ] Configure `AI_PROVIDER` and `AI_API_KEY`
-- [ ] Set up database backups (cron or API)
-- [ ] Run `./scripts/audit.sh` — all checks pass
-- [ ] Verify `/health` endpoint returns 200
-- [ ] Set up TLS termination (nginx, cloudflare, etc.)
-- [ ] Configure log aggregation (ELK, Loki, etc.)
-- [ ] Set up monitoring alerts on `/metrics`
-- [ ] Review and enable `SECURITY_HARDENING_ENABLED` if needed
-- [ ] Test disaster recovery (backup + restore)
+- [ ] Configure `AI_PROVIDER` and `AI_API_KEY` (if using non-local provider)
+- [ ] Set `AUTH_SECRET` (if enabling auth)
+- [ ] Verify `/health` returns 200
+- [ ] Test WebSocket connection (`/api/tasks/{id}/ws`)
+- [ ] Verify static assets load (`/`, `/static/style.css`)
+- [ ] Set up monitoring (uptime check on `/health`)
+- [ ] Set up log aggregation
+- [ ] Test backup/restore procedure
+- [ ] Run `./scripts/audit.sh`
+
+---
+
+## Monitoring
+
+### Health Check
+```bash
+curl https://your-domain.com/health
+# {"status": "ok", "version": "1.0.1"}
+```
+
+### System Health (detailed)
+```bash
+curl https://your-domain.com/api/system/health
+```
+
+### Prometheus Metrics
+```bash
+# Install prometheus_client first
+pip install prometheus_client
+
+# Then scrape
+curl https://your-domain.com/metrics
+```
 
 ---
 
@@ -242,14 +224,37 @@ docker logs pk-ninja-agent
 ```
 
 ### Database locked
-SQLite allows only one writer. If you see "database is locked":
-- Ensure only one instance writes to the DB
-- Use WAL mode (enabled by default)
+SQLite allows only one writer. Ensure only one instance writes to the DB.
 
 ### High memory usage
 - Reduce `WORKER_MAX_CONCURRENCY`
-- Check workspace sizes (`SECURITY_MAX_WORKSPACE_FILES`)
+- Check workspace sizes
 
-### Tests failing in CI
-- Ensure `AI_PROVIDER=local` and `GITHUB_TOKEN=""` in CI env
-- Check Python version matrix matches your code
+### WebSocket not working behind proxy
+Ensure your proxy forwards WebSocket upgrade headers. The `nginx.conf` in the repo includes this configuration.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Nginx / Reverse Proxy (TLS termination)   │
+├─────────────────────────────────────────────┤
+│  FastAPI (uvicorn, single worker)           │
+│  ├── REST API (/api/*)                      │
+│  ├── WebSocket (/api/tasks/*/ws)            │
+│  ├── SSE (/api/tasks/*/stream)              │
+│  ├── Static files (/static/*)               │
+│  └── Health check (/health)                 │
+├─────────────────────────────────────────────┤
+│  SQLite (WAL mode)                          │
+│  ├── tasks, events                          │
+│  ├── sessions, settings                     │
+│  └── repo_files, repo_symbols               │
+├─────────────────────────────────────────────┤
+│  Filesystem                                 │
+│  ├── /app/data/ (database)                  │
+│  └── /app/workspaces/ (git repos)           │
+└─────────────────────────────────────────────┘
+```
