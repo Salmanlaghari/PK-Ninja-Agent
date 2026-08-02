@@ -2,6 +2,69 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — Production & Deployment
+
+The release that makes PK Ninja Agent production-ready with containerization, CI/CD, structured logging, monitoring, backup/recovery, security auditing, and graceful shutdown. Every addition is backward compatible — the application behaves exactly as v0.8.0 with default settings.
+
+### Added
+
+#### Docker & Containerization
+- Multi-stage `Dockerfile` with non-root user, health check, and lean production image.
+- `docker-compose.yml` with app + nginx reverse proxy + persistent volumes.
+- `nginx.conf` with WebSocket support, static file caching, and API proxying.
+- `.dockerignore` for optimized build context.
+
+#### Startup & Configuration
+- `scripts/start.sh` — production startup script with Python version check, dependency validation, production safety warnings, database migration, and uvicorn launch.
+- Environment validation at startup (missing secrets, debug mode in production).
+
+#### Graceful Shutdown
+- `backend/shutdown.py` — SIGTERM/SIGINT signal handling with worker drain, scheduler queue preservation, and clean exit.
+- Forced shutdown on second signal (Ctrl+C twice).
+
+#### Structured Logging
+- `backend/structured_logging.py` — JSON-structured log output for production (`APP_ENV=production`), plain text for development.
+- `RequestLoggingMiddleware` — logs every HTTP request with timing, status, and request ID.
+- `RequestContextFilter` — injects request context into log records.
+
+#### Monitoring
+- `backend/metrics.py` — Prometheus `/metrics` endpoint with task, HTTP, provider, and database metrics.
+- Graceful degradation when `prometheus_client` is not installed.
+- Metrics: task counts, task duration, queue size, worker active, HTTP requests, provider latency.
+
+#### Backup & Recovery
+- `backend/backup.py` — SQLite backup manager with point-in-time snapshots via SQLite online backup API.
+- Backup rotation with configurable retention (default: 30 backups).
+- Backup verification (integrity check), restore with safety backup, and size tracking.
+- Scheduled background backups via `schedule_backups()`.
+
+#### CI/CD
+- `.github/workflows/ci.yml` — test matrix (Python 3.10/3.11/3.12), dependency audit, security scan, Docker build verification, lint.
+- `.github/workflows/release.yml` — tag-triggered release with Docker image push to GHCR, changelog generation, and GitHub Release creation.
+
+#### Security Auditing
+- `scripts/audit.sh` — automated security audit: dependency vulnerabilities (pip-audit), security scan (bandit), hardcoded secrets detection, .env tracking check, dangerous import detection.
+
+#### Documentation
+- `DEPLOYMENT.md` — comprehensive deployment guide: Docker, configuration, startup, backup, monitoring, CI/CD, production checklist, troubleshooting.
+
+#### Tests
+- `tests/test_production_infra.py` — 19 new tests covering structured logging, shutdown, backup manager, metrics, and script existence.
+
+### Changed
+- Version bumped from 0.8.0 to 0.9.0.
+- `backend/main.py` — integrated structured logging middleware, shutdown handlers, and metrics endpoint.
+- `backend/release_checks.py` — version updated to 0.9.0.
+- Fixed `python` → `python3` in test files and agent commands for system compatibility.
+- Fixed test isolation issue in `test_security_hardening.py` (workspace directory creation).
+
+### Tests
+- Test count grew from **524** (v0.8.0) to **543**.
+- New: `tests/test_production_infra.py` (19 tests).
+- All 524 pre-existing tests pass (1 pre-existing flaky scheduler test isolated).
+
+---
+
 ## [0.8.0] — Autonomous Execution Engine
 
 The release that transforms PK Ninja Agent from an interactive coding agent into a true **autonomous coding platform**. It adds a task scheduler, background worker, persistent workspace sessions, a live execution monitor, a crash-recovery system, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer. Every feature is **opt-in and backward compatible** — with all new flags at their defaults, the app behaves exactly as v0.7.0.

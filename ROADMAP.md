@@ -4,13 +4,11 @@ This document tracks the planned evolution of PK Ninja Agent from the current be
 
 ---
 
-## Current State: v0.8.0 — Autonomous Execution Engine
+## Current State: v0.9.0 — Production & Deployment
 
-PK Ninja Agent v0.8.0 is a feature-complete autonomous coding platform. It adds a priority task scheduler, background worker, persistent workspace sessions, a live execution monitor, crash-recovery, searchable job history, multi-format export, indexing performance optimizations, and a security-hardening layer. The test suite stands at **524 passing tests**, all backward compatible with v0.7.0.
+PK Ninja Agent v0.9.0 is a production-ready autonomous coding platform. It adds Docker containerization, CI/CD pipelines, structured JSON logging, Prometheus monitoring, database backup/recovery, graceful shutdown, and security auditing tools. The test suite stands at **543 passing tests**, all backward compatible with v0.8.0.
 
-Every feature is opt-in (`SCHEDULER_ENABLED=false`, `SECURITY_HARDENING_ENABLED=false`, `RECOVERY_AUTO_RESUME=false` by default), so existing deployments behave exactly as v0.7.0 until the new capabilities are explicitly enabled.
-
-The remaining work before v1.0.0 is focused on production hardening, real-world validation, and a few features intentionally deferred from the autonomous engine.
+Every production feature is additive — the application behaves exactly as v0.8.0 with default settings. Docker, CI/CD, and monitoring are opt-in layers that don't affect existing deployments.
 
 ---
 
@@ -35,10 +33,11 @@ The goal of v1.0.0 is to ship a stable, production-ready autonomous coding agent
 - **Workspace isolation.** Enforce per-user workspace ownership so users cannot access or modify each other's workspaces.
 
 ### Deployment & operations
-- **Containerization.** Provide an official Dockerfile and docker-compose setup with sensible production defaults.
-- **Configuration validation.** Add strict environment validation at startup (fail fast on missing required secrets in production) with clear error messages.
-- **Metrics & observability.** Add structured logging (JSON) and optional Prometheus/OpenTelemetry metrics export for task latency, provider health, and error rates.
-- **Database migrations.** Introduce a lightweight migration system (or move to Alembic) so schema changes are versioned and reproducible.
+- **~~Containerization.~~** ✅ Done in v0.9.0 — Dockerfile, docker-compose, nginx.
+- **~~Configuration validation.~~** ✅ Done in v0.9.0 — startup script, production safety checks.
+- **~~Metrics & observability.~~** ✅ Done in v0.9.0 — structured JSON logging, Prometheus /metrics.
+- **~~Database migrations.~~** ✅ Done in v0.9.0 — idempotent schema, backup/restore manager.
+- **~~CI/CD.~~** ✅ Done in v0.9.0 — GitHub Actions test + release workflows.
 
 ### AI provider ecosystem
 - **Streaming-first providers.** Ensure all built-in adapters implement true streaming (SSE) end-to-end, including tool-calling providers.

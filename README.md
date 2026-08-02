@@ -608,3 +608,92 @@ The full suite grew from 314 tests (v0.7.0) to **524 tests** across these new fi
 | `tests/test_security_hardening.py` | 65 | Sensitive paths, destructive args, extra blocklist, workspace validation, API |
 
 All 314 pre-existing tests continue to pass unchanged.
+
+---
+
+## 15. v0.9.0 — Production & Deployment
+
+The v0.9.0 release makes PK Ninja Agent **production-ready** with containerization, CI/CD, structured logging, monitoring, backup/recovery, graceful shutdown, and security auditing. Every addition is backward compatible — the application behaves exactly as v0.8.0 with default settings.
+
+### Docker & Containerization
+
+- Multi-stage `Dockerfile` with non-root user, health check, and lean production image (~150MB).
+- `docker-compose.yml` with app + nginx reverse proxy + persistent volumes.
+- `nginx.conf` with WebSocket support, static file caching, and API proxying.
+
+```bash
+docker compose up -d  # start everything
+```
+
+### Startup & Validation
+
+`scripts/start.sh` validates the environment before launching:
+- Python version check (3.10+)
+- Dependency verification
+- Production safety warnings (DEBUG, AUTH_SECRET, AUTH_ENABLED)
+- Database migration
+- Uvicorn launch with configured workers
+
+### Graceful Shutdown
+
+`backend/shutdown.py` handles SIGTERM/SIGINT:
+- Stops accepting new connections
+- Drains in-flight requests
+- Stops background worker
+- Second signal forces immediate exit
+
+### Structured Logging
+
+`backend/structured_logging.py` provides JSON logs in production:
+```json
+{"timestamp": "2026-08-02T10:00:00Z", "level": "INFO", "logger": "pk_ninja.access", "message": "GET /health → 200 (2ms)", "request_id": "abc123", "duration_ms": 2.0}
+```
+
+### Prometheus Metrics
+
+`backend/metrics.py` exposes `/metrics` for scraping:
+- Task counts, task duration, queue size, worker active
+- HTTP request counts and latency
+- AI provider call counts and latency
+- Database operation counts
+
+Graceful degradation when `prometheus_client` is not installed.
+
+### Backup & Recovery
+
+`backend/backup.py` provides SQLite backup management:
+- Point-in-time snapshots via SQLite online backup API
+- Backup rotation with configurable retention
+- Integrity verification and restore with safety backup
+- Scheduled background backups
+
+### CI/CD
+
+GitHub Actions workflows:
+- **CI** (`.github/workflows/ci.yml`): test matrix (Python 3.10/3.11/3.12), dependency audit, security scan, Docker build, lint.
+- **Release** (`.github/workflows/release.yml`): tag-triggered release with Docker image push to GHCR.
+
+### Security Audit
+
+`scripts/audit.sh` checks:
+- Dependency vulnerabilities (pip-audit)
+- Security scan (bandit)
+- Hardcoded secrets detection
+- .env tracking check
+- Dangerous import detection
+
+### New environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
+| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `LOG_FILE` | (stdout) | Log file path (JSON format in production) |
+| `UVICORN_WORKERS` | `1` | Number of uvicorn worker processes |
+
+### Test coverage
+
+The full suite grew from 524 tests (v0.8.0) to **543 tests**:
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/test_production_infra.py` | 19 | Structured logging, shutdown, backup manager, metrics, scripts |
