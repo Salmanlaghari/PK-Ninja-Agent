@@ -21,8 +21,5 @@
         { "key": "X-Content-Type-Options", "value": "nosniff" }
       ]
     }
-  ],
-  "concurrency": {
-    "limit": 5
-  }
+  ]
 }
