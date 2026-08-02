@@ -40,7 +40,7 @@ from ai_provider import (
     get_provider,
 )
 from config import Settings, get_settings
-from github import GitHubError, clone_or_pull, repo_info
+from github import GitHubError, clone_or_pull
 from models import EventType, TaskStatus
 from terminal import TerminalError, run_command, validate_command
 from workspace import Workspace, WorkspaceError

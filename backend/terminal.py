@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from workspace import CommandResult, Workspace, WorkspaceError
+from workspace import CommandResult, Workspace
 
 
 # Programs the agent is allowed to invoke. Add cautiously.

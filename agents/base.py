@@ -234,3 +234,18 @@ class AgentProtocol(Protocol):
     name: str
 
     def run(self, ctx: AgentContext, message: AgentMessage) -> AgentResult: ...
+
+
+def get_runtime_for_ctx(ctx: AgentContext):
+    """Return the TaskRuntime for the given context, or None.
+
+    Shared utility so terminal_agent and testing_agent don't duplicate this.
+    """
+    try:
+        from agent import get_runtime
+        rt = get_runtime(ctx.task_id)
+        if rt is not None:
+            return rt
+    except Exception:
+        pass
+    return None

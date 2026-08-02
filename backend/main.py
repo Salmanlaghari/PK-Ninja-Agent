@@ -42,10 +42,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import (BUS, TaskRuntime, cancel_task, get_runtime,
+from agent import (BUS, cancel_task, get_runtime,
                    list_runtimes, new_task_id, start_task)
 from ai_provider import provider_status
-from auth import (AuthError, AuthService, InvalidTokenError, User,
+from auth import (AuthError, InvalidTokenError, User,
                   get_auth_service, reset_auth_service)
 from config import Settings, get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
@@ -77,22 +77,21 @@ from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
 from workspace import Workspace, WorkspaceError
 
 # v0.8.0 — Autonomous Execution Engine (opt-in; no-op when disabled)
-from scheduler import (QueueStatus, TaskScheduler, get_scheduler,
+from scheduler import (TaskScheduler, get_scheduler,
                        init_scheduler, reset_scheduler)
-from worker import (BackgroundWorker, get_worker, init_worker,
+from worker import (get_worker, init_worker,
                     reset_worker, stop_worker)
 from sessions import (close_session as _close_session, create_session,
                       delete_session as _delete_session, find_active_for_repo,
                       get_session, list_sessions, touch_session)
-from monitor import monitor_snapshot, psutil_available, system_metrics
+from monitor import monitor_snapshot, system_metrics
 from recovery import (detect_interrupted, mark_task_failed, recovery_summary,
                       resume_task)
 from history import (get_job_detail, history_stats, query_history)
 from exporter import (export_history_csv, export_history_json,
                       export_logs_json, export_logs_text,
                       export_report_markdown)
-from security import (WorkspaceValidationResult, check_extra_blocked,
-                      full_command_check, is_sensitive_path,
+from security import (full_command_check, is_sensitive_path,
                       validate_workspace)
 
 from structured_logging import setup_logging, RequestLoggingMiddleware

@@ -52,7 +52,6 @@ from typing import (
 import httpx
 
 from config import Settings, get_settings
-from workspace import Workspace
 
 
 class AIError(Exception):
