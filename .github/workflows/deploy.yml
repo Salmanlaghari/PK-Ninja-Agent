@@ -3,8 +3,8 @@
 #
 # Required secrets (set in repo Settings → Secrets):
 #   FLY_API_TOKEN     — Fly.io API token (from `flyctl auth token`)
-#   RENDER_API_KEY    — Render API key (from render.com/account)
-#   RENDER_SERVICE_ID — Render service ID (from service URL)
+#   RENDER_API_KEY    — Render API key (from render.com/account/api-keys)
+#   RENDER_SERVICE_ID — Render service ID (from service dashboard URL)
 #
 # Usage:
 #   1. Go to Actions tab → Deploy → Run workflow
@@ -19,16 +19,16 @@ on:
       platform:
         description: 'Deploy target'
         required: true
-        default: 'fly'
+        default: 'render'
         type: choice
         options:
-          - fly
           - render
+          - fly
   release:
     types: [published]
 
 concurrency:
-  group: deploy-${{ github.event.inputs.platform || 'fly' }}
+  group: deploy-${{ github.event.inputs.platform || 'render' }}
   cancel-in-progress: false
 
 permissions:
@@ -36,11 +36,38 @@ permissions:
   packages: read
 
 jobs:
+  deploy-render:
+    name: Deploy to Render
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'render')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          curl -sf -X POST \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache": false}'
+        continue-on-error: true
+
+      - name: Summary
+        run: |
+          echo "## 🚀 Deploy triggered on Render" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** pk-ninja-agent" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** https://pk-ninja-agent.onrender.com" >> $GITHUB_STEP_SUMMARY
+          echo "**Health:** https://pk-ninja-agent.onrender.com/health" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check your Render dashboard for deployment status." >> $GITHUB_STEP_SUMMARY
+
   deploy-fly:
     name: Deploy to Fly.io
     if: >-
-      github.event_name == 'release' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'fly')
+      github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'fly'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -56,17 +83,17 @@ jobs:
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: *** secrets.FLY_API_TOKEN }}
 
       - name: Get app URL
         id: url
         run: echo "URL=https://$(flyctl status --json | python3 -c 'import sys,json; print(json.load(sys.stdin)["App"]["Name"])').fly.dev" >> $GITHUB_OUTPUT
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: *** secrets.FLY_API_TOKEN }}
 
       - name: Verify health
         run: |
-          sleep 10
+          sleep 15
           curl -sf "${{ steps.url.outputs.URL }}/health" || echo "Health check will pass after app stabilizes"
 
       - name: Summary
@@ -75,25 +102,3 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** ${{ steps.url.outputs.URL }}" >> $GITHUB_STEP_SUMMARY
           echo "**Health:** ${{ steps.url.outputs.URL }}/health" >> $GITHUB_STEP_SUMMARY
-
-  deploy-render:
-    name: Deploy to Render
-    if: >-
-      github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'render'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-    steps:
-      - name: Trigger Render deploy
-        run: |
-          curl -sf -X POST \
-            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"clearCache": false}'
-
-      - name: Summary
-        run: |
-          echo "## 🚀 Deploy triggered on Render" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Check your Render dashboard for deployment status." >> $GITHUB_STEP_SUMMARY

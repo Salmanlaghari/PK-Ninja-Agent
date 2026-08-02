@@ -4,8 +4,14 @@
 # Usage:
 #   1. Push this file to your repo
 #   2. Go to render.com → New → Blueprint
-#   3. Connect your GitHub repo
-#   4. Render will auto-detect this file and create services
+#   3. Connect your GitHub repo (Salmanlaghari/PK-Ninja-Agent)
+#   4. Render auto-detects this file and creates the service
+#   5. Click "Apply" — deployment starts automatically
+#
+# Free tier: 750 hours/month, spins down after 15 min inactivity
+# Free subdomain: https://pk-ninja-agent.onrender.com
+# HTTPS: Automatic (Let's Encrypt)
+# Note: SQLite data resets on spin-down (free tier has no persistent disk)
 
 services:
   - type: web
@@ -27,14 +33,8 @@ services:
       - key: LOG_LEVEL
         value: INFO
       - key: DATABASE_PATH
-        value: /opt/render/project/src/data/pk_ninja.db
+        value: /app/data/pk_ninja.db
       - key: WORKSPACE_ROOT
-        value: /opt/render/project/src/workspaces
-      - key: PYTHON_VERSION
-        value: "3.12"
+        value: /app/workspaces
     healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: pk-ninja-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
