@@ -58,6 +58,12 @@ Branch: `feat/ide-workspace-v3`
 - **Tool Selection Engine:** Designed an interactive, state-driven agent loop with real-time tool selection (file read, search, file write, edit, delete, git actions, terminal execution, etc.) dynamically powered by LLM tool routing.
 - **Frontend Live Progress UI:** Overhauled the web dashboard to render an elegant Execution Plan Progress component, including custom step status icons, active step highlight animations, retry badges, and real-time step status styling.
 
+### Phase 9: Vercel Production Deployment Configuration
+- **Entrypoint Routing:** Created `pyproject.toml` pointing to `backend.main:app` as the primary modern entrypoint configuration for zero-config FastAPI deployments on Vercel.
+- **Python Version Pinning:** Added `.python-version` explicitly pinning the Python version to `3.12` to match Vercel's default stable runtime.
+- **Writability Guard:** Configured and documented `/tmp`-based writable paths (`/tmp/pk_ninja.db` and `/tmp/workspaces`) to bypass Vercel's read-only serverless filesystem.
+- **Comprehensive Documentation:** Produced `DEPLOYMENT.md` and updated `README.md`, `.env.example`, and `CHANGELOG.md` to define full workspace environment settings and deployment instructions.
+
 ---
 
 ## Files Changed
@@ -72,6 +78,10 @@ Branch: `feat/ide-workspace-v3`
 - `frontend/index.html` — designed the modern sidebar layout, mobile tab navigation, modal file previewer, and the execution progress dashboard.
 - `frontend/style.css` — modern shinobi cyberpunk workspace stylesheets, media breakpoint rules, and animated step execution statuses.
 - `frontend/app.js` — fully featured vanilla JS controller for tabs, tasks, tree files, git actions, and real-time execution step progress render.
+- `pyproject.toml` — created modern Vercel-compatible Python entrypoint routing configuration.
+- `.python-version` — pinned stable Python version 3.12 for Vercel builds.
+- `DEPLOYMENT.md` — produced highly-detailed Vercel and production deployment guide.
+- `CHANGELOG.md` — documented deployment and AI provider-specific version changes.
 - `tests/test_indexing.py` — newly added unit tests for incremental indexing and symbol search.
 - `tests/test_git_workflow.py` — newly added unit tests for branch management, staging, and traversal protections.
 - `tests/test_context_engine.py` — added unit tests verifying local candidate selection and LLM selection logic.
