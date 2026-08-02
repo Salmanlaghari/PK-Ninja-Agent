@@ -92,6 +92,18 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
+    # ── Built-in default AI API key (v1.2.0) ──────────────────────────────
+    # A built-in, provider-agnostic key shipped with the app so that users
+    # who do not have their own API key can still use the AI directly. The
+    # built-in key is the *lowest-priority* source: any env var (JULES_API_KEY,
+    # AI_API_KEY, GEMINI_API_KEY) or a per-user stored key always wins. This
+    # keeps the app usable out-of-the-box while letting operators/users
+    # override it at any layer. Set BUILTIN_AI_API_KEY="" to disable.
+    builtin_ai_api_key: str = Field(
+        default="",
+        alias="BUILTIN_AI_API_KEY",
+    )
+
     # ── Jules (Google's async coding agent) — official REST API (v1.1.0) ────
     # Dedicated API key for the official Jules API at
     # https://jules.googleapis.com/v1alpha. Auth uses the x-goog-api-key
@@ -241,11 +253,23 @@ class Settings(BaseSettings):
     def effective_jules_key(self) -> str:
         """Resolve the Jules API key.
 
-        Prefers the dedicated JULES_API_KEY, then falls back to the generic
-        AI_API_KEY and the legacy GEMINI_API_KEY so a single Google key can be
-        reused across providers.
+        Priority (highest first):
+          1. ``JULES_API_KEY`` env var
+          2. ``AI_API_KEY`` env var (generic)
+          3. ``GEMINI_API_KEY`` legacy env var
+          4. The built-in default key (``BUILTIN_AI_API_KEY``)
+
+        Per-user keys stored via the secret store are layered on top of this
+        by ``get_provider()`` (see ``ai_provider.py``), so a user's own key
+        always wins over everything here.
         """
-        return self.jules_api_key or self.ai_api_key or self.gemini_api_key
+        if self.jules_api_key:
+            return self.jules_api_key
+        if self.ai_api_key:
+            return self.ai_api_key
+        if self.gemini_api_key:
+            return self.gemini_api_key
+        return self.builtin_ai_api_key or ""
 
     def provider_enabled_names(self) -> list:
         """Parse PROVIDER_ENABLED into a list of provider names (empty = all)."""

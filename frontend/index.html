@@ -371,11 +371,56 @@
           </select>
         </div>
 
+        <!-- AI Provider selection (cards with descriptions & key status) -->
         <div class="settings-group">
-          <label class="settings-label" for="set-provider">AI Provider</label>
-          <select id="set-provider" class="settings-select">
-            <option value="local">local</option>
-          </select>
+          <label class="settings-label">AI Provider</label>
+          <div id="set-provider-cards" class="provider-cards">
+            <div class="provider-cards-empty">Loading providers…</div>
+          </div>
+          <input id="set-provider" type="hidden" value="local" />
+        </div>
+
+        <!-- AI API Key section -->
+        <div class="settings-group">
+          <label class="settings-label" for="set-apikey">AI API Key</label>
+          <div id="apikey-status-row" class="apikey-status-row">
+            <span id="apikey-status-dot" class="apikey-dot none"></span>
+            <span id="apikey-status-text" class="apikey-status-text">No key set</span>
+            <span id="apikey-masked" class="apikey-masked"></span>
+          </div>
+          <div class="settings-row apikey-input-row">
+            <input id="set-apikey" class="settings-input" type="password"
+              placeholder="Paste your AI provider API key" autocomplete="off" spellcheck="false" />
+            <button id="apikey-save" class="btn primary btn-tiny">Save key</button>
+            <button id="apikey-remove" class="btn ghost btn-tiny" hidden>Remove</button>
+          </div>
+          <div id="apikey-hint" class="apikey-hint"></div>
+          <div id="apikey-status" class="settings-status" hidden></div>
+        </div>
+
+        <!-- GitHub Connect section -->
+        <div class="settings-group">
+          <label class="settings-label">GitHub Connection</label>
+          <div id="gh-status-row" class="apikey-status-row">
+            <span id="gh-status-dot" class="apikey-dot none"></span>
+            <span id="gh-status-text" class="apikey-status-text">Not connected</span>
+            <span id="gh-login" class="apikey-masked"></span>
+            <img id="gh-avatar" class="gh-avatar" hidden />
+          </div>
+          <div class="settings-row apikey-input-row">
+            <input id="set-gh-token" class="settings-input" type="password"
+              placeholder="GitHub personal access token (repo, workflow scopes)"
+              autocomplete="off" spellcheck="false" />
+            <button id="gh-connect" class="btn primary btn-tiny">Connect</button>
+            <button id="gh-disconnect" class="btn ghost btn-tiny" hidden>Disconnect</button>
+          </div>
+          <div class="settings-row gh-repo-row">
+            <input id="set-gh-owner" class="settings-input settings-inline" type="text" placeholder="owner (optional)" />
+            <input id="set-gh-repo" class="settings-input settings-inline" type="text" placeholder="repo (optional)" />
+          </div>
+          <p class="login-hint">Connect your GitHub account so the agent can clone, commit, push, and open PRs. The token is verified against the GitHub API and stored encrypted — never echoed back.</p>
+          <a class="apikey-link" href="https://github.com/settings/tokens/new?description=PK%20Ninja%20Agent&scopes=repo,workflow" target="_blank" rel="noopener">Create a GitHub token →</a>
+          <div id="gh-status" class="settings-status" hidden></div>
         </div>
 
         <div class="settings-group">
@@ -429,11 +474,11 @@
       <p class="login-sub">Authentication is enabled for this deployment.</p>
 
       <div id="login-github-section" class="login-section">
-        <label class="login-label" for="login-github-token">GitHub token</label>
+        <label class="login-label" for="login-github-token">Sign in with GitHub</label>
         <input id="login-github-token" class="login-input" type="password"
           placeholder="Paste a GitHub personal access token" autocomplete="off" spellcheck="false" />
         <button id="btn-login-github" class="btn primary login-btn">Sign in with GitHub</button>
-        <p class="login-hint">Your token is verified against the GitHub API and never stored server-side.</p>
+        <p class="login-hint">Your token is verified against the GitHub API and never stored server-side. Need a token? <a class="apikey-link" href="https://github.com/settings/tokens/new?description=PK%20Ninja%20Agent&scopes=repo,workflow" target="_blank" rel="noopener">Create one →</a></p>
       </div>
 
       <div class="login-divider-row">

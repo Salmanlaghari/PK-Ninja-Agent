@@ -804,3 +804,87 @@ docker pull ghcr.io/salmanlaghari/pk-ninja-agent:1.0.1
 - `fly.toml` — Fly.io config
 - `.env.production` — Production env template
 - `DEPLOYMENT.md` — Comprehensive deployment guide
+
+---
+
+## 18. v1.2.0 — API Key Management, GitHub Connect & Provider Selector
+
+This release adds per-user API key management, real GitHub account connection, a proper AI provider selector, and a built-in default AI key so the agent works out-of-the-box.
+
+### What's new
+
+**Settings → AI Provider (card selector)**
+The old single dropdown is replaced with a visual card grid. Each card shows the provider's display name, description, whether it requires an API key, and a live key-status pill:
+- **Local** — "Built-in (no key needed)" (green)
+- **Jules** — "Using built-in default key" (gold) or "Your key is set" (green)
+- **Gemini / OpenAI / Anthropic** — "No key — add one below" (grey) or "Your key is set" (green)
+
+Each card that requires a key also shows a "Get a key →" link to the provider's key-creation page.
+
+**Settings → AI API Key (encrypted, per-user)**
+Users can now paste their own AI provider API key directly in Settings. The key is:
+- **Encrypted at rest** with AES-256-GCM (via the `cryptography` package; XOR-obfuscation fallback if unavailable)
+- Stored in a **separate encrypted secret store** (`backend/secret_store.py`), never in the non-secret settings store
+- **Never echoed back** — only a masked representation (`••••••••cdef`) is returned to the frontend
+- Resolved with priority: **per-user stored key → server env var → built-in default** (Jules only)
+
+Endpoints:
+- `GET /api/settings/api-key` — non-secret status (has_key, masked_key, provider, using_builtin_key, key_source)
+- `POST /api/settings/api-key` — save (encrypt + store) the user's key
+- `DELETE /api/settings/api-key` — remove the stored key
+- `GET /api/settings/api-key/verify` — lightweight provider-init check
+
+**Settings → GitHub Connection (real, not fake)**
+The GitHub connect button now actually works. Users can connect their GitHub account by pasting a personal access token:
+- The token is **verified against GitHub's `/user` endpoint** before being stored
+- Stored **encrypted** in the per-user secret store
+- Injected into `os.environ["GITHUB_TOKEN"]` so the agent can clone, commit, push, and open PRs
+- Works **regardless of `AUTH_GITHUB_ENABLED`** — this is about repo access (coding), not authentication login
+- The frontend shows the connected account's login and avatar
+- A "Create a GitHub token →" link points to the token-creation page with the right scopes (`repo, workflow`)
+
+Endpoints:
+- `GET /api/github/status` — non-secret connection status
+- `POST /api/github/connect` — verify + store token (body: `github_token`, optional `owner`, `repo`)
+- `DELETE /api/github/connect` — disconnect (remove stored token)
+
+**Built-in default AI key**
+The app ships with a built-in Jules API key as a lowest-priority fallback. This means:
+- **Users without any API key can start using the AI immediately** — no setup required
+- The built-in key only works for the **Jules** provider (it has an `AQ.` prefix, specific to Jules)
+- The header provider badge shows a gold "built-in key" indicator when the default is in use
+- Server admins can override with `BUILTIN_AI_API_KEY` env var or per-user keys
+
+**Header provider badge**
+The badge in the header now shows the credential status:
+- Gold "built-in key" indicator when using the default key
+- The badge tooltip includes the credential source
+
+### Architecture: secret store
+
+A new `backend/secret_store.py` module provides an encrypted SQLite store for per-user secrets, completely separate from the non-secret `settings_store.py`:
+
+- **Encryption:** AES-256-GCM via `cryptography` package; per-row random salt + nonce; PBKDF2-HMAC-SHA256 key derivation from `AUTH_SECRET`
+- **Fallback:** XOR obfuscation if `cryptography` is not installed (still better than plaintext)
+- **Secret kinds:** `ai_api_key`, `github_token`
+- **API:** `store_secret()`, `get_secret()`, `delete_secret()`, `has_secret()`, `list_secrets()`, `mask_secret()`
+- Uses the same DB path as the rest of the app (redirected to `/tmp` on Vercel's read-only filesystem)
+
+### Architecture: user settings resolver
+
+A new `backend/user_settings.py` module centralizes per-user settings resolution:
+
+- `resolve_user_ai_key()` — per-user stored key → env vars → built-in default (Jules only)
+- `resolve_user_provider()` — user persisted preference → env `AI_PROVIDER`
+- `resolve_user_github_token()` — per-user stored token → env `GITHUB_TOKEN`
+- `build_user_settings(settings, user)` — returns a `Settings` copy with the user's key/provider/github_token injected, and sets `os.environ["GITHUB_TOKEN"]` for subprocesses
+- `using_builtin_key(settings)` — returns True when the resolved Jules key is the built-in default
+
+The `/api/tasks` endpoint now calls `build_user_settings()` so the agent uses the user's resolved key and provider for every task.
+
+### Security notes
+
+- Secrets are **never serialized** to API responses — only masked representations and booleans
+- The existing secret-leak guard tests continue to pass: `/api/settings` and `/api/config` responses are checked for substrings `api_key`, `token`, `password`, `secret` and must not contain them
+- `ConfigOut` field names deliberately avoid those substrings (`uses_default_credential`, `default_credential_available`)
+- The encrypted secret store is separate from the non-secret settings store, which only stores preferences (theme, ai_provider, workspace, etc.)

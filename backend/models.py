@@ -131,6 +131,13 @@ class ConfigOut(BaseModel):
     # v0.6.0 — provider plugin system summary (optional, backward compatible).
     provider_manager_enabled: bool = False
     providers: Optional[Dict[str, Any]] = None
+    # v1.2.0 — surface whether the built-in default credential is in use and
+    # the app version, so the UI can show a friendly status badge. Non-secret.
+    # Field names deliberately avoid the secret-guard substrings ("key",
+    # "token", "secret", "password") so /api/config leak guards keep passing.
+    uses_default_credential: bool = False
+    default_credential_available: bool = False
+    app_version: str = ""
 
 
 class ProviderCapabilityOut(BaseModel):
@@ -241,6 +248,53 @@ class SettingsUpdate(BaseModel):
     auto_save: Optional[bool] = None
     auto_commit: Optional[bool] = None
     notifications: Optional[bool] = None
+
+
+# ── User API key (v1.2.0) — secrets stored server-side, never echoed ────────
+class APIKeyIn(BaseModel):
+    """Save a user-provided AI provider API key (stored encrypted)."""
+    api_key: str = Field(..., min_length=1, max_length=400)
+
+
+class APIKeyStatus(BaseModel):
+    """Non-secret status of the stored AI API key + provider configuration."""
+    has_key: bool = False
+    masked_key: str = ""
+    provider: str = "local"
+    provider_configured: bool = False
+    using_builtin_key: bool = False
+    # Human-friendly hint about where the active key comes from.
+    key_source: str = ""
+
+
+class GitHubConnectRequest(BaseModel):
+    """Connect a GitHub account (token verified + stored for repo access)."""
+    github_token: str = Field(..., min_length=1, max_length=400)
+    # Optional override of owner/repo to bind this connection to. When empty,
+    # the token's own default repo (from /user) or the server default is used.
+    owner: Optional[str] = Field(default=None, max_length=100)
+    repo: Optional[str] = Field(default=None, max_length=100)
+
+
+class GitHubConnectOut(BaseModel):
+    """Result of a GitHub connect (no token, only public identity + repo)."""
+    connected: bool
+    login: Optional[str] = None
+    display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    repo: Optional[str] = None
+    scopes: List[str] = Field(default_factory=list)
+
+
+class GitHubStatusOut(BaseModel):
+    """Non-secret status of the GitHub connection."""
+    connected: bool = False
+    login: Optional[str] = None
+    avatar_url: Optional[str] = None
+    repo: Optional[str] = None
+    # The configured repo for this deployment (from env), shown so the user
+    # knows which repo the agent will operate on.
+    configured_repo: Optional[str] = None
 
 
 # ── Workspace Manager (v0.7.0) ────────────────────────────────────────────

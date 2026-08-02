@@ -51,13 +51,19 @@ from auth import (AuthError, InvalidTokenError, User,
 from config import get_settings
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
+from secret_store import (delete_secret, get_secret, has_secret, list_secrets,
+                          mask_secret, store_secret)
+from user_settings import (build_user_settings, resolve_user_ai_key,
+                            resolve_user_provider, resolve_user_github_token,
+                            using_builtin_key)
 from release_checks import system_health as _system_health
 from workspace_manager import (WorkspaceManagerError, create_workspace,
                                delete_workspace, list_workspaces,
                                recent_workspaces, rename_workspace,
                                switch_workspace)
-from models import (ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
-                    EventType, GitHubLoginRequest, GitBranchRequest,
+from models import (APIKeyIn, APIKeyStatus, ConfigOut, DashboardOut, DashboardTaskItem, DiffOut,
+                    EventType, GitHubConnectRequest, GitHubConnectOut,
+                    GitHubLoginRequest, GitHubStatusOut, GitBranchRequest,
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
@@ -308,7 +314,7 @@ async def db_get_task_memory(task_id: str) -> Optional[dict]:
 # ── App ─────────────────────────────────────────────────────────────────
 settings = get_settings()
 
-app = FastAPI(title="PK Ninja Agent", version="1.1.1")
+app = FastAPI(title="PK Ninja Agent", version="1.2.0")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
@@ -394,7 +400,7 @@ async def auth_status(request: Request) -> dict:
         authenticated=svc.enabled and user is not None and user.user_id != "anonymous",
         auth_enabled=svc.enabled,
         user=_user_to_out(user) if (user and user.user_id != "anonymous") else None,
-    ).model_dump()
+    ).model_dump() | {"github_connect_enabled": True}
 
 
 @app.post("/api/auth/guest")
@@ -468,6 +474,170 @@ async def update_user_settings(body: SettingsUpdate,
     updates = body.model_dump(exclude_none=True)
     data = await update_settings_for_user(get_settings(), user, updates)
     return SettingsOut(**data).model_dump()
+
+
+# ── User API key + GitHub connect (v1.2.0) ─────────────────────────────────
+# These endpoints store secrets server-side (encrypted, per-user) and only
+# ever return masked / boolean status to the frontend. The plaintext is
+# consumed only by the AI provider factory and the GitHub integration.
+
+@app.get("/api/settings/api-key")
+async def get_api_key_status(user: User = Depends(current_user)) -> dict:
+    """Return non-secret status of the stored AI API key + provider config."""
+    settings = get_settings()
+    has = await has_secret(settings, user, "ai_api_key")
+    masked = ""
+    if has:
+        try:
+            masked = mask_secret(await get_secret(settings, user, "ai_api_key") or "")
+        except Exception:  # noqa: BLE001
+            masked = "••••••••"
+    provider = await resolve_user_provider(settings, user)
+    builtin = using_builtin_key(settings)
+    # Determine the human-friendly key source.
+    if has:
+        key_source = "your key"
+    elif (settings.jules_api_key or settings.ai_api_key or settings.gemini_api_key):
+        key_source = "server env var"
+    elif builtin:
+        key_source = "built-in default"
+    else:
+        key_source = "none (offline local provider)"
+    return APIKeyStatus(
+        has_key=has,
+        masked_key=masked,
+        provider=provider,
+        provider_configured=provider != "local",
+        using_builtin_key=builtin and not has,
+        key_source=key_source,
+    ).model_dump()
+
+
+@app.post("/api/settings/api-key")
+async def save_api_key(body: APIKeyIn,
+                       user: User = Depends(current_user)) -> dict:
+    """Save (encrypt + store) the user's AI provider API key."""
+    settings = get_settings()
+    try:
+        await store_secret(settings, user, "ai_api_key", body.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    masked = mask_secret(body.api_key)
+    log.info("api key stored for user %s (masked=%s)", _user_log_id(user), masked)
+    return {"ok": True, "masked_key": masked, "has_key": True}
+
+
+@app.delete("/api/settings/api-key")
+async def delete_api_key(user: User = Depends(current_user)) -> dict:
+    """Remove the stored AI API key (revert to env / built-in default)."""
+    settings = get_settings()
+    deleted = await delete_secret(settings, user, "ai_api_key")
+    return {"ok": deleted, "has_key": False}
+
+
+@app.get("/api/settings/api-key/verify")
+async def verify_api_key(user: User = Depends(current_user)) -> dict:
+    """Lightweight check that the resolved key can initialise the provider.
+
+    Does NOT make an external AI call — just constructs the provider to
+    confirm the key is present and the provider class loads. Useful for the
+    settings UI to show a green tick after saving a key.
+    """
+    from ai_provider import get_provider
+    settings = get_settings()
+    user_settings = await build_user_settings(settings, user)
+    try:
+        provider = get_provider(user_settings)
+        return {
+            "ok": True,
+            "provider": provider.name,
+            "configured": provider.name != "local",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "provider": "local", "configured": False,
+                "error": str(exc)[:200]}
+
+
+def _user_log_id(user: User) -> str:
+    uid = getattr(user, "user_id", None) or "anonymous"
+    return uid if uid != "anonymous" else "default"
+
+
+# ── GitHub connect (real, works without AUTH_GITHUB_ENABLED) ────────────────
+# The GitHub *connect* flow is intentionally separate from the GitHub *login*
+# (auth) flow. Connect stores a token so the agent can operate on a repo
+# (clone/commit/push/PR) for coding. It always works, regardless of whether
+# ``AUTH_GITHUB_ENABLED`` is set, because it is about repo access, not auth.
+
+@app.get("/api/github/status")
+async def github_status(user: User = Depends(current_user)) -> dict:
+    """Return non-secret status of the GitHub connection."""
+    settings = get_settings()
+    connected = await has_secret(settings, user, "github_token")
+    login = None
+    avatar = None
+    repo = None
+    if connected:
+        # We don't re-call the GitHub API on every status check (rate limits).
+        # The login/avatar are surfaced at connect time and stored transiently
+        # in the session; here we just report the boolean + configured repo.
+        # If the server env has GITHUB_OWNER/REPO we surface it.
+        repo = settings.github_repo_full()
+    configured_repo = settings.github_repo_full()
+    return GitHubStatusOut(
+        connected=connected,
+        login=login,
+        avatar_url=avatar,
+        repo=repo,
+        configured_repo=configured_repo,
+    ).model_dump()
+
+
+@app.post("/api/github/connect")
+async def github_connect(body: GitHubConnectRequest,
+                         user: User = Depends(current_user)) -> dict:
+    """Connect a GitHub account by verifying a token and storing it.
+
+    The token is verified against GitHub's ``/user`` endpoint (so we know it
+    is valid and can read the user's identity), then stored encrypted in the
+    secret store. The plaintext is never returned. When ``owner``/``repo``
+    are provided they are used to bind the connection; otherwise we fall back
+    to the server-configured repo.
+    """
+    settings = get_settings()
+    svc = get_auth_service(settings)
+    info = svc._verify_github_token(body.github_token.strip())
+    if not info:
+        raise HTTPException(status_code=401, detail="GitHub token verification failed.")
+    # Store the token (encrypted, per-user).
+    try:
+        await store_secret(settings, user, "github_token", body.github_token.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Determine the repo this connection is bound to.
+    repo = None
+    if body.owner and body.repo:
+        repo = f"{body.owner.strip()}/{body.repo.strip()}"
+    else:
+        repo = settings.github_repo_full()
+    log.info("github connected for user %s (login=%s, repo=%s)",
+             _user_log_id(user), info.get("login"), repo)
+    return GitHubConnectOut(
+        connected=True,
+        login=info.get("login"),
+        display_name=info.get("name") or info.get("login"),
+        avatar_url=info.get("avatar_url"),
+        repo=repo,
+        scopes=svc._github_scopes(body.github_token.strip(), info),
+    ).model_dump()
+
+
+@app.delete("/api/github/connect")
+async def github_disconnect(user: User = Depends(current_user)) -> dict:
+    """Remove the stored GitHub token (disconnect)."""
+    settings = get_settings()
+    deleted = await delete_secret(settings, user, "github_token")
+    return {"ok": deleted, "connected": False}
 
 
 # ── Workspace Manager routes (v0.7.0) ────────────────────────────────────────
@@ -750,7 +920,7 @@ async def _startup() -> None:
 # ── Health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "1.1.1"}
+    return {"status": "ok", "version": "1.2.0"}
 
 
 # ── Non-secret config (for the frontend) ────────────────────────────────
@@ -793,6 +963,9 @@ async def api_config() -> dict:
         repository_configured=bool(fresh.github_repo_full()),
         provider_manager_enabled=manager_enabled,
         providers=providers_summary,
+        uses_default_credential=using_builtin_key(fresh),
+        default_credential_available=bool(getattr(fresh, "builtin_ai_api_key", "") or ""),
+        app_version=getattr(app, "version", ""),
     ).model_dump()
 
 
@@ -934,10 +1107,18 @@ def _runtime_status(task_id: str, row: dict) -> None:
 
 
 @app.post("/api/tasks")
-async def api_create_task(body: TaskCreate) -> dict:
+async def api_create_task(body: TaskCreate,
+                          user: User = Depends(current_user)) -> dict:
     task_id = new_task_id()
     fresh = get_settings()
-    repo = body.repository or fresh.github_repo_full()
+    # v1.2.0: resolve per-user settings (stored API key, provider pref,
+    # GitHub token) so the agent uses the user's credentials instead of
+    # only the server env vars.
+    try:
+        user_settings = await build_user_settings(fresh, user)
+    except Exception:  # noqa: BLE001 — never let secret-store issues block tasks
+        user_settings = fresh
+    repo = body.repository or user_settings.github_repo_full()
     await db_create_task(task_id, body.description, repo)
     # v0.8.0: when the autonomous scheduler is enabled, enqueue the task so the
     # background worker picks it up by priority. Otherwise (default) keep the
@@ -952,7 +1133,7 @@ async def api_create_task(body: TaskCreate) -> dict:
         )
         return {"task_id": task_id, "status": item.status.value,
                 "repository": repo, "queued": True}
-    start_task(task_id, body.description, repo_full=repo)
+    start_task(task_id, body.description, repo_full=repo, settings=user_settings)
     return {"task_id": task_id, "status": TaskStatus.running.value,
             "repository": repo}
 

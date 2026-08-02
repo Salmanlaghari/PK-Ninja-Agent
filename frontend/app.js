@@ -196,6 +196,9 @@ const Auth = (() => {
 /* ============================================================= */
 const Settings = (() => {
   let current = null;
+  let _providers = null;      // cached provider list from /api/providers
+  let _apikeyStatus = null;   // cached API key status
+  let _ghStatus = null;       // cached GitHub connection status
 
   const fields = {
     theme: () => $("set-theme"),
@@ -211,6 +214,15 @@ const Settings = (() => {
     notifications: () => $("set-notifications"),
   };
 
+  // Per-provider "get a key" hint link.
+  const PROVIDER_KEY_LINKS = {
+    openai: "https://platform.openai.com/api-keys",
+    anthropic: "https://console.anthropic.com/settings/keys",
+    gemini: "https://aistudio.google.com/app/apikey",
+    jules: "https://jules.google/",
+    local: null,
+  };
+
   function showStatus(msg, ok) {
     const el = $("settings-status");
     if (!el) return;
@@ -220,17 +232,199 @@ const Settings = (() => {
     if (ok) setTimeout(() => { el.hidden = true; }, 2500);
   }
 
-  function populateProviderSelect(providers) {
-    const sel = $("set-provider");
-    if (!sel || !providers) return;
-    const cur = sel.value;
-    sel.innerHTML = "";
-    (providers || []).forEach(p => {
-      const o = document.createElement("option");
-      o.value = p.name; o.textContent = p.name;
-      sel.appendChild(o);
+  function showApikeyStatus(msg, ok) {
+    const el = $("apikey-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  function showGhStatus(msg, ok) {
+    const el = $("gh-status");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "settings-status " + (ok ? "ok" : "err");
+    el.hidden = !msg;
+    if (ok) setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  /* ── Provider cards (replaces the single dropdown) ───────────── */
+  function renderProviderCards(activeName) {
+    const container = $("set-provider-cards");
+    if (!container) return;
+    container.innerHTML = "";
+    if (!_providers || !_providers.length) {
+      container.innerHTML = '<div class="provider-cards-empty">No providers available.</div>';
+      return;
+    }
+    _providers.forEach((p) => {
+      const name = p.name || p;
+      const card = document.createElement("div");
+      card.className = "provider-card" + (name === activeName ? " selected" : "");
+      card.dataset.name = name;
+      const head = document.createElement("div");
+      head.className = "provider-card-head";
+      const nm = document.createElement("span");
+      nm.className = "provider-card-name";
+      nm.textContent = p.display_name || name;
+      head.appendChild(nm);
+      if (name === activeName) {
+        const tag = document.createElement("span");
+        tag.className = "pm-tag active-tag";
+        tag.textContent = "active";
+        head.appendChild(tag);
+      }
+      if (p.requires_api_key) {
+        const tag = document.createElement("span");
+        tag.className = "pm-tag requires-key";
+        tag.textContent = "API key";
+        head.appendChild(tag);
+      }
+      card.appendChild(head);
+      if (p.description) {
+        const desc = document.createElement("div");
+        desc.className = "provider-card-desc";
+        desc.textContent = p.description;
+        card.appendChild(desc);
+      }
+      // Key status pill per provider.
+      const ks = document.createElement("div");
+      ks.className = "provider-card-keystatus";
+      if (name === "local") {
+        ks.innerHTML = '<span class="apikey-dot ok"></span> Built-in (no key needed)';
+      } else if (p.requires_api_key) {
+        const hasKey = _apikeyStatus && _apikeyStatus.has_key;
+        const usingBuiltin = _apikeyStatus && _apikeyStatus.using_builtin_key && name === "jules";
+        if (hasKey) {
+          ks.innerHTML = '<span class="apikey-dot ok"></span> Your key is set';
+        } else if (usingBuiltin) {
+          ks.innerHTML = '<span class="apikey-dot builtin"></span> Using built-in default key';
+        } else {
+          ks.innerHTML = '<span class="apikey-dot none"></span> No key — add one below';
+        }
+      } else {
+        ks.innerHTML = '<span class="apikey-dot ok"></span> Ready';
+      }
+      card.appendChild(ks);
+      // "Get a key" hint link.
+      const link = PROVIDER_KEY_LINKS[name];
+      if (link) {
+        const a = document.createElement("a");
+        a.className = "apikey-link";
+        a.href = link;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "Get a key →";
+        card.appendChild(a);
+      }
+      card.addEventListener("click", () => selectProviderCard(name));
+      container.appendChild(card);
     });
-    if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+
+  function selectProviderCard(name) {
+    const hidden = $("set-provider");
+    if (hidden) hidden.value = name;
+    document.querySelectorAll("#set-provider-cards .provider-card").forEach((c) => {
+      c.classList.toggle("selected", c.dataset.name === name);
+    });
+    // Update the active tag.
+    document.querySelectorAll("#set-provider-cards .provider-card").forEach((c) => {
+      const head = c.querySelector(".provider-card-head");
+      if (!head) return;
+      const existing = head.querySelector(".active-tag");
+      if (c.dataset.name === name) {
+        if (!existing) {
+          const tag = document.createElement("span");
+          tag.className = "pm-tag active-tag";
+          tag.textContent = "active";
+          head.appendChild(tag);
+        }
+      } else if (existing) {
+        existing.remove();
+      }
+    });
+    // Update the API key hint to match the newly selected provider.
+    updateApikeyHint();
+  }
+
+  /* ── API key status rendering ────────────────────────────────── */
+  function renderApikeyStatus(st) {
+    _apikeyStatus = st || _apikeyStatus;
+    const dot = $("apikey-status-dot");
+    const text = $("apikey-status-text");
+    const masked = $("apikey-masked");
+    const removeBtn = $("apikey-remove");
+    if (!dot) return;
+    if (_apikeyStatus && _apikeyStatus.has_key) {
+      dot.className = "apikey-dot ok";
+      text.textContent = "Your API key is set";
+      masked.textContent = _apikeyStatus.masked_key || "";
+      if (removeBtn) removeBtn.hidden = false;
+    } else if (_apikeyStatus && _apikeyStatus.using_builtin_key) {
+      dot.className = "apikey-dot builtin";
+      text.textContent = "Using built-in default key";
+      masked.textContent = "";
+      if (removeBtn) removeBtn.hidden = true;
+    } else if (_apikeyStatus && _apikeyStatus.key_source && _apikeyStatus.key_source !== "none (offline local provider)") {
+      dot.className = "apikey-dot ok";
+      text.textContent = "Key from " + _apikeyStatus.key_source;
+      masked.textContent = "";
+      if (removeBtn) removeBtn.hidden = true;
+    } else {
+      dot.className = "apikey-dot none";
+      text.textContent = "No key set — agent runs in local/offline mode";
+      masked.textContent = "";
+      if (removeBtn) removeBtn.hidden = true;
+    }
+    // Update hint based on selected provider.
+    updateApikeyHint();
+  }
+
+  function updateApikeyHint() {
+    const hint = $("apikey-hint");
+    if (!hint) return;
+    const prov = ($("set-provider") || {}).value || "local";
+    if (prov === "local") {
+      hint.innerHTML = "The <b>local</b> provider needs no API key — it runs built-in heuristics.";
+    } else if (prov === "jules") {
+      hint.innerHTML = "Jules works with a built-in default key — you can start immediately. Add your own Jules key above for higher limits. <a class='apikey-link' href='https://jules.google/' target='_blank' rel='noopener'>Get a Jules key →</a>";
+    } else {
+      const link = PROVIDER_KEY_LINKS[prov];
+      hint.innerHTML = "The <b>" + prov + "</b> provider requires an API key." +
+        (link ? " <a class='apikey-link' href='" + link + "' target='_blank' rel='noopener'>Get a key →</a>" : "");
+    }
+  }
+
+  /* ── GitHub connection status rendering ──────────────────────── */
+  function renderGhStatus(st) {
+    _ghStatus = st || _ghStatus;
+    const dot = $("gh-status-dot");
+    const text = $("gh-status-text");
+    const login = $("gh-login");
+    const avatar = $("gh-avatar");
+    const disconnect = $("gh-disconnect");
+    if (!dot) return;
+    if (_ghStatus && _ghStatus.connected) {
+      dot.className = "apikey-dot ok";
+      text.textContent = "Connected";
+      if (login) login.textContent = _ghStatus.login || "";
+      if (avatar && _ghStatus.avatar_url) {
+        avatar.src = _ghStatus.avatar_url;
+        avatar.hidden = false;
+      } else if (avatar) {
+        avatar.hidden = true;
+      }
+      if (disconnect) disconnect.hidden = false;
+    } else {
+      dot.className = "apikey-dot none";
+      text.textContent = "Not connected";
+      if (login) login.textContent = "";
+      if (avatar) avatar.hidden = true;
+      if (disconnect) disconnect.hidden = true;
+    }
   }
 
   function applyToForm(s) {
@@ -275,20 +469,127 @@ const Settings = (() => {
     };
   }
 
+  async function loadProvidersList() {
+    try {
+      const r = await fetch("/api/providers");
+      if (!r.ok) return;
+      const body = await r.json();
+      _providers = (body.providers && Object.values(body.providers)) || [];
+      // Sort: local first, then alphabetical, active provider prominent.
+      _providers.sort((a, b) => {
+        if (a.name === "local") return -1;
+        if (b.name === "local") return 1;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+    } catch (e) { _providers = []; }
+  }
+
+  async function loadApikeyStatus() {
+    try {
+      const r = await fetch("/api/settings/api-key");
+      if (r.ok) { renderApikeyStatus(await r.json()); }
+    } catch (e) {}
+  }
+
+  async function loadGhStatus() {
+    try {
+      const r = await fetch("/api/github/status");
+      if (r.ok) { renderGhStatus(await r.json()); }
+    } catch (e) {}
+  }
+
+  async function saveApiKey() {
+    const input = $("set-apikey");
+    if (!input || !input.value.trim()) {
+      showApikeyStatus("Enter an API key first.", false);
+      return;
+    }
+    try {
+      const r = await fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: input.value.trim() }),
+      });
+      if (!r.ok) {
+        let msg = "Save failed (" + r.status + ").";
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch {}
+        showApikeyStatus(msg, false);
+        return;
+      }
+      const body = await r.json();
+      input.value = "";
+      renderApikeyStatus({ has_key: true, masked_key: body.masked_key, using_builtin_key: false, key_source: "your key" });
+      // Refresh provider cards so the key-status pills update.
+      const active = ($("set-provider") || {}).value || "local";
+      renderProviderCards(active);
+      showApikeyStatus("API key saved & encrypted.", true);
+    } catch (e) { showApikeyStatus("Network error saving key.", false); }
+  }
+
+  async function removeApiKey() {
+    try {
+      const r = await fetch("/api/settings/api-key", { method: "DELETE" });
+      if (!r.ok) { showApikeyStatus("Remove failed (" + r.status + ").", false); return; }
+      renderApikeyStatus({ has_key: false, masked_key: "", using_builtin_key: _apikeyStatus && _apikeyStatus.using_builtin_key, key_source: "none (offline local provider)" });
+      const active = ($("set-provider") || {}).value || "local";
+      renderProviderCards(active);
+      // Re-fetch true status (key_source may change to built-in/env).
+      await loadApikeyStatus();
+      renderProviderCards(active);
+      showApikeyStatus("API key removed.", true);
+    } catch (e) { showApikeyStatus("Network error removing key.", false); }
+  }
+
+  async function connectGithub() {
+    const input = $("set-gh-token");
+    const owner = ($("set-gh-owner") || {}).value || "";
+    const repo = ($("set-gh-repo") || {}).value || "";
+    if (!input || !input.value.trim()) {
+      showGhStatus("Enter a GitHub token first.", false);
+      return;
+    }
+    const payload = { github_token: input.value.trim() };
+    if (owner.trim()) payload.owner = owner.trim();
+    if (repo.trim()) payload.repo = repo.trim();
+    try {
+      const r = await fetch("/api/github/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        let msg = "Connect failed (" + r.status + ").";
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch {}
+        showGhStatus(msg, false);
+        return;
+      }
+      const body = await r.json();
+      input.value = "";
+      renderGhStatus({ connected: true, login: body.login, avatar_url: body.avatar_url, repo: body.repo });
+      showGhStatus("GitHub connected as " + (body.login || "user") + ".", true);
+    } catch (e) { showGhStatus("Network error connecting GitHub.", false); }
+  }
+
+  async function disconnectGithub() {
+    try {
+      const r = await fetch("/api/github/connect", { method: "DELETE" });
+      if (!r.ok) { showGhStatus("Disconnect failed (" + r.status + ").", false); return; }
+      renderGhStatus({ connected: false, login: "", avatar_url: "" });
+      showGhStatus("GitHub disconnected.", true);
+    } catch (e) { showGhStatus("Network error disconnecting GitHub.", false); }
+  }
+
   async function load() {
     try {
       const r = await fetch("/api/settings");
       if (!r.ok) return;
       const s = await r.json();
       applyToForm(s);
-      // Populate provider dropdown from the providers list if available.
-      try {
-        const pr = await fetch("/api/providers");
-        if (pr.ok) {
-          const body = await pr.json();
-          populateProviderSelect(body.providers || body);
-        }
-      } catch {}
+      // Load providers list + API key status + GitHub status in parallel,
+      // then render provider cards with the active selection highlighted.
+      await Promise.all([loadProvidersList(), loadApikeyStatus(), loadGhStatus()]);
+      renderProviderCards(s.ai_provider || "local");
+      updateApikeyHint();
     } catch (e) {}
   }
 
@@ -302,6 +603,8 @@ const Settings = (() => {
       if (!r.ok) { showStatus("Save failed (" + r.status + ").", false); return; }
       const s = await r.json();
       applyToForm(s);
+      // Refresh the header provider badge so the new active provider shows.
+      if (typeof loadProvider === "function") loadProvider();
       showStatus("Settings saved.", true);
       // Apply theme immediately if a theme switcher is implemented later.
     } catch (e) { showStatus("Network error saving settings.", false); }
@@ -320,7 +623,12 @@ const Settings = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(defaults),
       });
-      if (r.ok) { applyToForm(await r.json()); showStatus("Reset to defaults.", true); }
+      if (r.ok) {
+        applyToForm(await r.json());
+        renderProviderCards("local");
+        updateApikeyHint();
+        showStatus("Reset to defaults.", true);
+      }
     } catch (e) { showStatus("Reset failed.", false); }
   }
 
@@ -336,6 +644,21 @@ const Settings = (() => {
     if (bClose) bClose.addEventListener("click", close);
     if (bSave) bSave.addEventListener("click", save);
     if (bReset) bReset.addEventListener("click", reset);
+    // API key + GitHub connect buttons.
+    const bAkSave = $("apikey-save");
+    const bAkRemove = $("apikey-remove");
+    const bGhConnect = $("gh-connect");
+    const bGhDisconnect = $("gh-disconnect");
+    if (bAkSave) bAkSave.addEventListener("click", saveApiKey);
+    if (bAkRemove) bAkRemove.addEventListener("click", removeApiKey);
+    if (bGhConnect) bGhConnect.addEventListener("click", connectGithub);
+    if (bGhDisconnect) bGhDisconnect.addEventListener("click", disconnectGithub);
+    // Enter key on the API key input saves.
+    const akInput = $("set-apikey");
+    if (akInput) akInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveApiKey(); });
+    // Enter key on the GitHub token input connects.
+    const ghInput = $("set-gh-token");
+    if (ghInput) ghInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connectGithub(); });
     // Click outside the box closes the modal.
     const overlay = $("settings-modal");
     if (overlay) overlay.addEventListener("click", (e) => {
@@ -343,7 +666,9 @@ const Settings = (() => {
     });
   }
 
-  return { init, load, save, reset, open, close, applyToForm };
+  return { init, load, save, reset, open, close, applyToForm,
+           renderProviderCards, renderApikeyStatus, renderGhStatus,
+           loadApikeyStatus, loadGhStatus };
 })();
 
 
@@ -1507,12 +1832,25 @@ async function loadProvider() {
     const cfg = await r.json();
     providerName.textContent = cfg.provider || "local";
     providerBadge.hidden = false;
+    // Add a credential-status indicator to the badge title.
+    let credNote = "";
+    if (cfg.uses_default_credential) {
+      credNote = " · built-in key";
+      providerBadge.classList.add("builtin");
+    } else {
+      providerBadge.classList.remove("builtin");
+    }
     if (cfg.streaming_supported) {
       providerBadge.classList.add("live");
-      providerBadge.title = `${cfg.provider} · ${cfg.model || "?"} · live streaming`;
+      providerBadge.title = `${cfg.provider} · ${cfg.model || "?"} · live streaming${credNote}`;
     } else {
       providerBadge.classList.remove("live");
-      providerBadge.title = `${cfg.provider} · ${cfg.model || "?"}`;
+      providerBadge.title = `${cfg.provider} · ${cfg.model || "?"}${credNote}`;
+    }
+    // Show app version in the dashboard if present.
+    if (cfg.app_version) {
+      const dv = $("dash-version");
+      if (dv) dv.textContent = cfg.app_version;
     }
   } catch (e) {}
 }
