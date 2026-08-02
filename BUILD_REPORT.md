@@ -27,10 +27,25 @@ The project has evolved through:
 - **v1.0.1** — Public Deployment
 - **v1.1.0** — Jules Provider Integration ← **this release**
 
+### Phase 9: Vercel Production Deployment Configuration
+- **Entrypoint Routing:** Created `pyproject.toml` pointing to `backend.main:app` as the primary modern entrypoint configuration for zero-config FastAPI deployments on Vercel.
+- **Python Version Pinning:** Added `.python-version` explicitly pinning the Python version to `3.12` to match Vercel's default stable runtime.
+- **Writability Guard:** Configured and documented `/tmp`-based writable paths (`/tmp/pk_ninja.db` and `/tmp/workspaces`) to bypass Vercel's read-only serverless filesystem.
+- **Comprehensive Documentation:** Produced `DEPLOYMENT.md` and updated `README.md`, `.env.example`, and `CHANGELOG.md` to define full workspace environment settings and deployment instructions.
+
 ---
 
 ## 2. What Changed
 
+### Vercel Serverless Deployment Configuration
+- **`pyproject.toml`** — configures the Vercel modern Python runtime entrypoint as `backend.main:app` and declares a `[project]` section with runtime dependencies so Vercel can resolve the Python environment reliably.
+- **`.python-version`** — pins Python 3.12 (Vercel's default supported version) for build-time and runtime stability.
+- **`backend/__init__.py`** — makes `backend` a proper importable Python package so the `backend.main:app` entrypoint resolves correctly on Vercel's serverless runtime.
+- **`DEPLOYMENT.md`** — comprehensive deployment guide now covers Vercel (serverless, zero-config) alongside the existing Docker / Fly.io / Render options.
+- **`README.md`** — added a "Vercel Deployment" section referencing `DEPLOYMENT.md`.
+- **`.env.example`** — documented the full set of supported AI providers (`local`, `openai`, `gemini`, `anthropic`, `jules`).
+
+### v1.1.0 — Jules Provider Integration
 ### New: JulesProvider (official async API)
 The previous `JulesProvider` was a stub that targeted a fictitious OpenAI-compatible endpoint (`https://api.jules.google.dev/v1`) with Bearer auth. It was replaced entirely with a real adapter for the official Jules REST API:
 

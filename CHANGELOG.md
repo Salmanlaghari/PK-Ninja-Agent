@@ -2,6 +2,23 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Vercel Serverless Deployment Configuration
+
+### Added
+- **`pyproject.toml`** — configures the Vercel modern Python runtime entrypoint as `backend.main:app`, telling Vercel's builder to load the FastAPI `app` instance from `backend/main.py`. Also declares a `[project]` section with runtime dependencies so Vercel can resolve the Python environment reliably.
+- **`.python-version`** — pins Python 3.12 (Vercel's default supported version) for build-time and runtime stability.
+- **`backend/__init__.py`** — makes `backend` a proper importable Python package so the `backend.main:app` entrypoint resolves correctly on Vercel's serverless runtime.
+- **`DEPLOYMENT.md`** — comprehensive deployment guide now covers Vercel (serverless, zero-config) alongside the existing Docker / Fly.io / Render options, including the critical `/tmp` writable-directory configuration for SQLite (`DATABASE_PATH=/tmp/pk_ninja.db`) and workspaces (`WORKSPACE_ROOT=/tmp/workspaces`).
+
+### Changed
+- **`README.md`** — added a "Vercel Deployment" section referencing `DEPLOYMENT.md`.
+- **`.env.example`** — documented the full set of supported AI providers (`local`, `openai`, `gemini`, `anthropic`, `jules`).
+
+### Fixed
+- **Vercel build failure** — resolved by adding `backend/__init__.py` (the `backend.main:app` entrypoint requires `backend` to be an importable package) and by declaring runtime dependencies in `pyproject.toml`'s `[project]` section for reliable dependency resolution during the Vercel build.
+
+---
+
 ## [1.1.0] — Jules Provider Integration
 
 First-class integration of the official Jules asynchronous coding-agent REST API as a production AI provider, registered alongside the existing local, Gemini, and mock providers.

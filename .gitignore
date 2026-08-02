@@ -239,3 +239,9 @@ summarized_conversations/
 -e 
 # Deployment configs
 .env.production
+
+# Sandbox / browser automation artifacts (not part of the project)
+.browser_data/
+.psiphon_data/
+.screenshots/
+FINAL_REPORT_v1.1.0.md

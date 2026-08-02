@@ -168,6 +168,16 @@ If GitHub vars are unset, the agent still runs in a local-only workspace (clone/
 
 ---
 
+## 5.1 Vercel Deployment
+
+PK Ninja Agent can be easily deployed to **Vercel** with zero-configuration using Vercel's modern Python runtime.
+
+The repository includes `pyproject.toml` and `.python-version` configured for FastAPI routing on Vercel out of the box.
+
+For complete, step-by-step instructions on setting up writable serverless directory paths (`DATABASE_PATH` and `WORKSPACE_ROOT` under `/tmp`), environmental configurations, and deployment steps, please refer to our detailed **[Vercel Deployment Guide (DEPLOYMENT.md)](./DEPLOYMENT.md)**.
+
+---
+
 ## 6. Local Development
 
 ```bash
