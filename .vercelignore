@@ -1,0 +1,30 @@
+# Keep the Vercel deployment lean — exclude dev/test/build artifacts that
+# the serverless function does not need at runtime.
+tests/
+.github/
+*.md
+!README.md
+summarized_conversations/
+superninja_ref/
+outputs/
+tmp/
+workspaces/
+.browser_data/
+.psiphon_data/
+.devcontainer/
+.ruff_cache/
+.pytest_cache/
+pk_ninja.db
+*.db
+None
+Screenshot_*.jpg
+todo*.md
+FINAL_REPORT_*.md
+Screenshot_*.png
+.env
+fly.toml
+render.yaml
+nginx.conf
+docker-compose.yml
+Dockerfile
+.dockerignore

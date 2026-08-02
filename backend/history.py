@@ -50,14 +50,25 @@ async def _connect(db_path: Path) -> aiosqlite.Connection:
     """Open a read-only connection to the shared DB.
 
     Uses ``file:`` URI with ``mode=ro`` so we can never accidentally write.
-    Falls back to a normal connection if the URI form is unsupported.
+    Falls back to a normal connection if the URI form is unsupported. Either
+    way we apply the serverless-safe PRAGMAs (busy_timeout in particular) via
+    the centralized ``db.connect`` helper so concurrent reads never hit
+    "unable to open database file" on Vercel.
     """
     uri = f"file:{db_path}?mode=ro"
     try:
         conn = await aiosqlite.connect(uri, uri=True)
     except Exception:  # pragma: no cover - extremely unlikely
-        conn = await aiosqlite.connect(str(db_path))
+        from db import connect as _db_connect
+        conn = await _db_connect(db_path)
     conn.row_factory = aiosqlite.Row
+    # Apply busy_timeout + temp_store=MEMORY even on read-only connections
+    # (journal_mode=WAL is rejected on RO, which is fine — we ignore failures).
+    for pragma in ("PRAGMA busy_timeout=30000", "PRAGMA temp_store=MEMORY"):
+        try:
+            await conn.execute(pragma)
+        except Exception:
+            pass
     return conn
 
 

@@ -97,9 +97,9 @@ def _config_defaults(settings: Any) -> Dict[str, Any]:
 
 
 async def _connect(db_path: Path) -> aiosqlite.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(str(db_path))
-    conn.row_factory = aiosqlite.Row
+    # Centralized serverless-safe connector (WAL + busy_timeout + dir create).
+    from db import connect as _db_connect
+    conn = await _db_connect(db_path)
     await conn.executescript(_SCHEMA)
     await conn.commit()
     return conn

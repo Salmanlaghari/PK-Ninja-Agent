@@ -226,7 +226,13 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
-        p = Path(self.database_path)
+        # Operator override: DB_PATH (or the legacy DATABASE_PATH alias) wins
+        # outright so Vercel env vars are honoured verbatim.
+        env = os.environ.get("DB_PATH") or os.environ.get("DATABASE_PATH")
+        if env:
+            p = Path(env)
+        else:
+            p = Path(self.database_path)
         if is_serverless():
             # SQLite "can't be used with Vercel" per the Vercel KB because the
             # filesystem is ephemeral/read-only. We still create the DB file
@@ -234,12 +240,29 @@ class Settings(BaseSettings):
             # /api/auth/status, the dashboard UI) work. Long-lived task state
             # is inherently ephemeral on serverless and should move to a
             # managed store for production, but /tmp lets the app run.
-            p = _TMP_ROOT / "pk_ninja.db"
+            if not env:
+                p = _TMP_ROOT / "pk_ninja.db"
         return p.resolve()
 
     def github_repo_full(self) -> Optional[str]:
+        # 1) Explicit GITHUB_OWNER + GITHUB_REPO env vars (highest priority).
         if self.github_owner and self.github_repo:
             return f"{self.github_owner}/{self.github_repo}"
+        # 2) GITHUB_REPOSITORY env var in "owner/repo" format — this is what
+        #    Vercel and GitHub Actions inject automatically when the project
+        #    is linked to a repo. Parsing it here means the app detects the
+        #    repo even when the operator only set the single standard var.
+        env_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+        if "/" in env_repo:
+            owner, _, repo = env_repo.partition("/")
+            owner = owner.strip()
+            repo = repo.strip()
+            if owner and repo:
+                # Cache into the fields so downstream code (github.py, UI)
+                # sees a consistent config without re-parsing every call.
+                self.github_owner = owner
+                self.github_repo = repo
+                return f"{owner}/{repo}"
         return None
 
     def effective_api_key(self) -> str:
