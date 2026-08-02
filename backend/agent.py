@@ -655,7 +655,7 @@ class Agent:
             import aiosqlite
             from indexing import index_workspace
             async def _run_idx():
-                async with aiosqlite.connect(self.settings.database_path) as conn:
+                async with aiosqlite.connect(str(self.settings.db_path)) as conn:
                     # Ensure tables exist
                     await conn.executescript(
                         "CREATE TABLE IF NOT EXISTS repo_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, mtime REAL NOT NULL, indexed_at TEXT NOT NULL, UNIQUE(task_id, path));"
@@ -691,10 +691,10 @@ class Agent:
         from context_engine import find_candidate_files, ai_select_relevant_files
         try:
             import asyncio
-            candidates = asyncio.run(find_candidate_files(self.task_id, self.description, self.settings.database_path, ws))
+            candidates = asyncio.run(find_candidate_files(self.task_id, self.description, str(self.settings.db_path), ws))
         except RuntimeError:
             loop = asyncio.new_event_loop()
-            candidates = loop.run_until_complete(find_candidate_files(self.task_id, self.description, self.settings.database_path, ws))
+            candidates = loop.run_until_complete(find_candidate_files(self.task_id, self.description, str(self.settings.db_path), ws))
             loop.close()
 
         try:
@@ -727,7 +727,7 @@ class Agent:
             import aiosqlite
             from indexing import get_project_map
             async def _get_map():
-                async with aiosqlite.connect(self.settings.database_path) as conn:
+                async with aiosqlite.connect(str(self.settings.db_path)) as conn:
                     return await get_project_map(self.task_id, ws, conn)
             try:
                 project_map_str = asyncio.run(_get_map())
@@ -1032,7 +1032,7 @@ class Agent:
             try:
                 import asyncio
                 async def _run_search():
-                    async with aiosqlite.connect(ws.settings.database_path) as conn:
+                    async with aiosqlite.connect(str(ws.settings.db_path)) as conn:
                         return await search_symbols(self.task_id, args.get("query", ""), conn)
                 try:
                     return asyncio.run(_run_search())
@@ -1083,7 +1083,7 @@ class Agent:
             try:
                 import asyncio
                 async def _run_idx():
-                    async with aiosqlite.connect(self.settings.database_path) as conn:
+                    async with aiosqlite.connect(str(self.settings.db_path)) as conn:
                         return await index_workspace(self.task_id, ws, conn)
                 try:
                     return asyncio.run(_run_idx())
