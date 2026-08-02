@@ -19,7 +19,7 @@ def test_index_html_served():
     with TestClient(app) as c:
         r = c.get("/")
         assert r.status_code == 200
-        assert "PK" in r.text or "NINJA" in r.text
+        assert "NinjaDev" in r.text or "NINJA" in r.text or "PK" in r.text
 
 
 def test_static_css_served():

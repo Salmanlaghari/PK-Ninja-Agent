@@ -1292,24 +1292,31 @@ function ensureThinkingLine() {
   if (thinkingLine && document.body.contains(thinkingLine)) return thinkingLine;
   clearPlaceholders();
   thinkingLine = document.createElement("div");
-  thinkingLine.className = "ev thinking";
+  thinkingLine.className = "act-event evt-plan";
   thinkingLabel = document.createElement("div");
   thinkingLabel.className = "thinking-label typing";
-  const glyph = document.createElement("span");
-  glyph.className = "glyph";
-  glyph.textContent = GLYPH.thinking;
-  const msg = document.createElement("span");
-  msg.className = "msg";
+  const icon = document.createElement("span");
+  icon.className = "act-icon";
+  icon.textContent = "✦";
+  const body = document.createElement("div");
+  body.className = "act-body";
+  const title = document.createElement("div");
+  title.className = "act-title";
+  title.textContent = "Thinking";
+  const msg = document.createElement("div");
+  msg.className = "act-detail thinking-msg";
   const dots = document.createElement("span");
   dots.className = "typing-dots";
   dots.innerHTML = "<span></span><span></span><span></span>";
-  thinkingLabel.appendChild(glyph);
-  thinkingLabel.appendChild(msg);
-  thinkingLabel.appendChild(dots);
+  body.appendChild(title);
+  body.appendChild(msg);
+  body.appendChild(dots);
+  thinkingLabel.appendChild(icon);
+  thinkingLabel.appendChild(body);
   thinkingLine.appendChild(thinkingLabel);
   activity.appendChild(thinkingLine);
   activity.scrollTop = activity.scrollHeight;
-  return thinkingLine.querySelector(".msg");
+  return thinkingLine.querySelector(".thinking-msg");
 }
 
 function appendThinkingToken(token) {
@@ -1346,6 +1353,47 @@ function updateExecutionPlanUI(planSteps) {
   }).join("");
 }
 
+// Map event types to card accent classes + icons (v1.4.0 SuperNinja-style cards)
+const EVT_CARD_MAP = {
+  session_started: { cls: "evt-ok", icon: "✓" },
+  analyzing: { cls: "evt-plan", icon: "🧠" },
+  searching: { cls: "evt-tool", icon: "🔍" },
+  file_read: { cls: "evt-info", icon: "📄" },
+  planning: { cls: "evt-plan", icon: "🧠" },
+  editing: { cls: "evt-step", icon: "✏️" },
+  command_started: { cls: "evt-command", icon: "💻" },
+  command_output: { cls: "evt-info", icon: "›" },
+  command_finished: { cls: "evt-ok", icon: "✓" },
+  test_started: { cls: "evt-step", icon: "🧪" },
+  test_finished: { cls: "evt-ok", icon: "✓" },
+  error: { cls: "evt-err", icon: "✗" },
+  fixing: { cls: "evt-warn", icon: "🔧" },
+  completed: { cls: "evt-completed", icon: "📦" },
+  info: { cls: "evt-info", icon: "•" },
+  thinking: { cls: "evt-plan", icon: "✦" },
+  cancelled: { cls: "evt-warn", icon: "✖" },
+};
+
+const EVT_TITLE_MAP = {
+  session_started: "Session Started",
+  analyzing: "Analyzing",
+  searching: "Searching",
+  file_read: "Reading File",
+  planning: "Planning",
+  editing: "Editing",
+  command_started: "Running Command",
+  command_output: "Command Output",
+  command_finished: "Command Finished",
+  test_started: "Running Tests",
+  test_finished: "Tests Finished",
+  error: "Error",
+  fixing: "Fixing",
+  completed: "Task Completed",
+  info: "Info",
+  thinking: "Thinking",
+  cancelled: "Cancelled",
+};
+
 function renderEvent(ev) {
   if (ev.type === "thinking") {
     const token = (ev.data && (ev.data.token || ev.data.text)) ||
@@ -1361,12 +1409,13 @@ function renderEvent(ev) {
   }
 
   clearPlaceholders();
+  const cardInfo = EVT_CARD_MAP[ev.type] || { cls: "evt-info", icon: "•" };
+  const title = EVT_TITLE_MAP[ev.type] || ev.type.replace(/_/g, " ");
+  const warning = ev.data && ev.data.warning
+    ? ` ⚠ ${escapeHtml(ev.data.warning)}` : "";
   const div = document.createElement("div");
-  div.className = "ev " + ev.type;
-  const glyph = GLYPH[ev.type] ?? "•";
-  const meta = ev.data && ev.data.warning
-    ? `<span class="meta">⚠ ${escapeHtml(ev.data.warning)}</span>` : "";
-  div.innerHTML = `<span class="glyph">${glyph}</span><span class="msg">${escapeHtml(ev.message)}${meta}</span>`;
+  div.className = `act-event ${cardInfo.cls}`;
+  div.innerHTML = `<span class="act-icon">${cardInfo.icon}</span><div class="act-body"><div class="act-title">${escapeHtml(title)}</div><div class="act-detail">${escapeHtml(ev.message)}${warning}</div></div>`;
   activity.appendChild(div);
   activity.scrollTop = activity.scrollHeight;
 

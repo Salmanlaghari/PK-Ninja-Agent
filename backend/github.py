@@ -1,20 +1,30 @@
 """GitHub integration — all operations stay server-side.
 
-Uses the authenticated ``gh`` CLI (which reads GITHUB_TOKEN from the env) for
-API calls, and plain ``git`` for clone/pull/commit/push. Credentials are never
-exposed to the frontend.
+Uses the GitHub REST API (via ``urllib.request``) for metadata reads and
+plain ``git`` for clone/pull/commit/push. Credentials are never exposed to
+the frontend. This works on serverless platforms (Vercel) where the ``gh``
+CLI is not installed, because it talks to api.github.com directly using
+``GITHUB_TOKEN`` from the environment.
 
 Functions:
   * repo_info()           -> public metadata for the configured repo
   * clone_or_pull()       -> populate a workspace from the repo
   * prepare_pull_request()-> build a PR title/body + ready-to-call PR payload
                               (does NOT create the PR — that's an explicit user action)
+  * list_user_repos()     -> list the authenticated user's repositories
+  * list_repo_issues()    -> list issues for a repo
+  * list_repo_prs()       -> list pull requests for a repo
+  * get_repo_details()    -> detailed info about a single repo
+  * list_repo_branches()  -> list branches for a repo
+  * create_pull_request() -> open a PR (explicit user action only)
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
@@ -65,37 +75,109 @@ def _run(args, cwd, timeout=60) -> CommandResult:
 
 
 def _gh(args, timeout=30) -> CommandResult:
-    """Run a ``gh`` CLI command using the token from the environment."""
+    """Run a ``gh`` CLI command using the token from the environment.
+
+    Kept as a fallback for environments where the ``gh`` CLI is installed.
+    On serverless platforms (Vercel) the CLI is absent, so callers should
+    prefer :func:`_github_api` which talks to the REST API directly.
+    """
     env = dict(os.environ)
     env["GH_TOKEN"] = os.environ.get("GITHUB_TOKEN", "")
-    proc = subprocess.run(
-        ["gh", *args], capture_output=True, text=True,
-        timeout=timeout, env=env,
-    )
-    return CommandResult(
-        command="gh " + " ".join(args),
-        returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-    )
+    try:
+        proc = subprocess.run(
+            ["gh", *args], capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+        return CommandResult(
+            command="gh " + " ".join(args),
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+    except FileNotFoundError:
+        return CommandResult(
+            command="gh " + " ".join(args),
+            returncode=127,
+            stdout="",
+            stderr="gh CLI is not installed on this host",
+        )
+    except subprocess.TimeoutExpired:
+        return CommandResult(
+            command="gh " + " ".join(args),
+            returncode=124,
+            stdout="",
+            stderr="gh CLI timed out",
+        )
+
+
+def _github_token() -> str:
+    """Return the GitHub token from the environment (or empty string)."""
+    return os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+
+
+def _github_api(path: str, *, method: str = "GET",
+                body: Optional[dict] = None,
+                timeout: int = 30,
+                raw: bool = False) -> object:
+    """Call the GitHub REST API directly using ``urllib.request``.
+
+    ``path`` is the part after ``https://api.github.com`` (with or without a
+    leading slash). Returns the parsed JSON response (a dict or list), or the
+    raw decoded text when ``raw=True``. Raises :class:`GitHubError` on any
+    HTTP error or missing token.
+    """
+    token = _github_token()
+    if not token:
+        raise GitHubError(
+            "No GitHub token configured. Set the GITHUB_TOKEN environment "
+            "variable (or connect your GitHub account in Settings)."
+        )
+    url = path if path.startswith("http") else f"https://api.github.com/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "NinjaDev-Agent",
+    }
+    data = None
+    if body is not None or method in ("POST", "PATCH", "PUT"):
+        payload = json.dumps(body or {}).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        data = payload
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8", errors="replace")
+            if raw or not content:
+                return content
+            return json.loads(content)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            pass
+        raise GitHubError(
+            f"GitHub API {method} {path} failed: HTTP {exc.code} {detail}"
+        )
+    except urllib.error.URLError as exc:
+        raise GitHubError(f"GitHub API {method} {path} failed: {exc.reason}")
+    except json.JSONDecodeError:
+        raise GitHubError(f"GitHub API {method} {path} returned invalid JSON")
 
 
 def repo_info(settings: Optional[Settings] = None) -> RepoInfo:
     settings = settings or get_settings()
     if not settings.github_repo_full():
         raise GitHubError("GITHUB_OWNER / GITHUB_REPO are not configured.")
-    res = _gh(["repo", "view", settings.github_repo_full(), "--json",
-               "nameWithOwner,defaultBranchRef,isPrivate,description,url,url"])
-    if not res.success:
-        raise GitHubError(f"gh repo view failed: {res.stderr.strip()}")
-    data = json.loads(res.stdout)
+    data = _github_api(f"repos/{settings.github_repo_full()}")
     return RepoInfo(
-        full_name=data.get("nameWithOwner", settings.github_repo_full()),
-        default_branch=(data.get("defaultBranchRef") or {}).get("name", "main"),
-        private=bool(data.get("isPrivate", False)),
+        full_name=data.get("full_name", settings.github_repo_full()),
+        default_branch=data.get("default_branch", "main"),
+        private=bool(data.get("private", False)),
         description=data.get("description") or "",
-        html_url=data.get("url", ""),
-        clone_url=f"https://github.com/{settings.github_repo_full()}.git",
+        html_url=data.get("html_url", ""),
+        clone_url=data.get("clone_url", f"https://github.com/{settings.github_repo_full()}.git"),
     )
 
 
@@ -203,31 +285,26 @@ def list_user_repos(settings: Optional[Settings] = None,
                     limit: int = 30) -> list:
     """List the authenticated user's repositories.
 
-    Uses ``gh repo list`` which reads ``GH_TOKEN`` / ``GITHUB_TOKEN`` from
-    the environment. Returns a list of dicts with name, full_name, private,
-    description, default_branch, updated_at, and html_url.
+    Calls the GitHub REST API (``GET /user/repos``) using ``GITHUB_TOKEN``
+    from the environment. Returns a list of dicts with name, full_name,
+    private, description, default_branch, updated_at, and html_url.
     """
-    res = _gh([
-        "repo", "list", "--limit", str(limit),
-        "--json", "name,nameWithOwner,isPrivate,description,"
-                  "defaultBranchRef,updatedAt,url",
-    ], timeout=30)
-    if not res.success:
-        raise GitHubError(f"gh repo list failed: {res.stderr.strip()[:300]}")
-    try:
-        data = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
+    data = _github_api(
+        f"user/repos?per_page={min(max(limit, 1), 100)}&sort=updated&direction=desc",
+        timeout=30,
+    )
+    if not isinstance(data, list):
         data = []
     repos = []
-    for item in data:
+    for item in data[:limit]:
         repos.append({
             "name": item.get("name", ""),
-            "full_name": item.get("nameWithOwner", ""),
-            "private": bool(item.get("isPrivate", False)),
+            "full_name": item.get("full_name", ""),
+            "private": bool(item.get("private", False)),
             "description": item.get("description") or "",
-            "default_branch": (item.get("defaultBranchRef") or {}).get("name", "main"),
-            "updated_at": item.get("updatedAt", ""),
-            "html_url": item.get("url", ""),
+            "default_branch": item.get("default_branch", "main"),
+            "updated_at": item.get("updated_at", ""),
+            "html_url": item.get("html_url", ""),
         })
     return repos
 
@@ -238,31 +315,29 @@ def list_repo_issues(owner: str, repo: str,
                      settings: Optional[Settings] = None) -> list:
     """List issues for ``owner/repo``.
 
-    ``state`` can be ``open``, ``closed``, or ``all``.
+    ``state`` can be ``open``, ``closed``, or ``all``. Calls the GitHub REST
+    API (``GET /repos/{owner}/{repo}/issues``).
     """
-    full = f"{owner}/{repo}"
-    res = _gh([
-        "issue", "list", "--repo", full,
-        "--state", state, "--limit", str(limit),
-        "--json", "number,title,state,author,createdAt,updatedAt,url,labels",
-    ], timeout=30)
-    if not res.success:
-        raise GitHubError(f"gh issue list failed: {res.stderr.strip()[:300]}")
-    try:
-        data = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
+    data = _github_api(
+        f"repos/{owner}/{repo}/issues?state={state}&per_page={min(max(limit, 1), 100)}",
+        timeout=30,
+    )
+    if not isinstance(data, list):
         data = []
+    # The issues endpoint also returns PRs (they are issues too); filter those.
     issues = []
-    for item in data:
-        author = item.get("author") or {}
+    for item in data[:limit]:
+        if "pull_request" in item:
+            continue
+        user = item.get("user") or {}
         issues.append({
             "number": item.get("number", 0),
             "title": item.get("title", ""),
             "state": item.get("state", ""),
-            "author": author.get("login", "") if isinstance(author, dict) else str(author),
-            "created_at": item.get("createdAt", ""),
-            "updated_at": item.get("updatedAt", ""),
-            "url": item.get("url", ""),
+            "author": user.get("login", "") if isinstance(user, dict) else str(user),
+            "created_at": item.get("created_at", ""),
+            "updated_at": item.get("updated_at", ""),
+            "url": item.get("html_url", ""),
             "labels": [l.get("name", "") if isinstance(l, dict) else str(l)
                        for l in (item.get("labels") or [])],
         })
@@ -275,35 +350,29 @@ def list_repo_prs(owner: str, repo: str,
                   settings: Optional[Settings] = None) -> list:
     """List pull requests for ``owner/repo``.
 
-    ``state`` can be ``open``, ``closed``, ``merged``, or ``all``.
+    ``state`` can be ``open``, ``closed``, or ``all``. Calls the GitHub REST
+    API (``GET /repos/{owner}/{repo}/pulls``).
     """
-    full = f"{owner}/{repo}"
-    res = _gh([
-        "pr", "list", "--repo", full,
-        "--state", state, "--limit", str(limit),
-        "--json", "number,title,state,author,headRefName,baseRefName,"
-                  "createdAt,updatedAt,url,isDraft,additions,deletions",
-    ], timeout=30)
-    if not res.success:
-        raise GitHubError(f"gh pr list failed: {res.stderr.strip()[:300]}")
-    try:
-        data = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
+    data = _github_api(
+        f"repos/{owner}/{repo}/pulls?state={state}&per_page={min(max(limit, 1), 100)}",
+        timeout=30,
+    )
+    if not isinstance(data, list):
         data = []
     prs = []
-    for item in data:
-        author = item.get("author") or {}
+    for item in data[:limit]:
+        user = item.get("user") or {}
         prs.append({
             "number": item.get("number", 0),
             "title": item.get("title", ""),
             "state": item.get("state", ""),
-            "author": author.get("login", "") if isinstance(author, dict) else str(author),
-            "head_branch": item.get("headRefName", ""),
-            "base_branch": item.get("baseRefName", ""),
-            "created_at": item.get("createdAt", ""),
-            "updated_at": item.get("updatedAt", ""),
-            "url": item.get("url", ""),
-            "is_draft": bool(item.get("isDraft", False)),
+            "author": user.get("login", "") if isinstance(user, dict) else str(user),
+            "head_branch": (item.get("head") or {}).get("ref", ""),
+            "base_branch": (item.get("base") or {}).get("ref", ""),
+            "created_at": item.get("created_at", ""),
+            "updated_at": item.get("updated_at", ""),
+            "url": item.get("html_url", ""),
+            "is_draft": bool(item.get("draft", False)),
             "additions": item.get("additions", 0),
             "deletions": item.get("deletions", 0),
         })
@@ -312,71 +381,81 @@ def list_repo_prs(owner: str, repo: str,
 
 def get_repo_details(owner: str, repo: str,
                      settings: Optional[Settings] = None) -> dict:
-    """Get detailed info about a single repo."""
+    """Get detailed info about a single repo.
+
+    Calls the GitHub REST API (``GET /repos/{owner}/{repo}``).
+    """
     full = f"{owner}/{repo}"
-    res = _gh([
-        "repo", "view", full, "--json",
-        "name,nameWithOwner,isPrivate,description,defaultBranchRef,"
-        "url,stargazerCount,forkCount,primaryLanguage,createdAt,updatedAt",
-    ], timeout=30)
-    if not res.success:
-        raise GitHubError(f"gh repo view failed: {res.stderr.strip()[:300]}")
-    try:
-        data = json.loads(res.stdout or "{}")
-    except json.JSONDecodeError:
+    data = _github_api(f"repos/{full}")
+    if not isinstance(data, dict):
         data = {}
-    lang = data.get("primaryLanguage") or {}
+    lang = data.get("language")
     return {
         "name": data.get("name", ""),
-        "full_name": data.get("nameWithOwner", full),
-        "private": bool(data.get("isPrivate", False)),
+        "full_name": data.get("full_name", full),
+        "private": bool(data.get("private", False)),
         "description": data.get("description") or "",
-        "default_branch": (data.get("defaultBranchRef") or {}).get("name", "main"),
-        "html_url": data.get("url", ""),
-        "stars": data.get("stargazerCount", 0),
-        "forks": data.get("forkCount", 0),
-        "language": lang.get("name", "") if isinstance(lang, dict) else str(lang),
-        "created_at": data.get("createdAt", ""),
-        "updated_at": data.get("updatedAt", ""),
+        "default_branch": data.get("default_branch", "main"),
+        "html_url": data.get("html_url", ""),
+        "stars": data.get("stargazers_count", 0),
+        "forks": data.get("forks_count", 0),
+        "language": lang if isinstance(lang, str) else (lang or ""),
+        "created_at": data.get("created_at", ""),
+        "updated_at": data.get("updated_at", ""),
     }
 
 
 def list_repo_branches(owner: str, repo: str,
                        limit: int = 30,
                        settings: Optional[Settings] = None) -> list:
-    """List branches for ``owner/repo``."""
-    full = f"{owner}/{repo}"
-    res = _gh([
-        "api", f"repos/{full}/branches",
-        "--paginate", "--jq",
-        f'[.[:{limit}][] | {{"name": .name, "protected": .protected}}]',
-    ], timeout=30)
-    if not res.success:
-        raise GitHubError(f"gh api branches failed: {res.stderr.strip()[:300]}")
-    try:
-        return json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
+    """List branches for ``owner/repo``.
+
+    Calls the GitHub REST API (``GET /repos/{owner}/{repo}/branches``).
+    """
+    data = _github_api(
+        f"repos/{owner}/{repo}/branches?per_page={min(max(limit, 1), 100)}",
+        timeout=30,
+    )
+    if not isinstance(data, list):
+        data = []
+    branches = []
+    for item in data[:limit]:
+        branches.append({
+            "name": item.get("name", ""),
+            "protected": bool(item.get("protected", False)),
+        })
+    return branches
 
 
 def create_pull_request(workspace: Workspace, *,
                         title: Optional[str] = None,
                         body: Optional[str] = None,
                         settings: Optional[Settings] = None) -> dict:
-    """Actually open a PR via ``gh``. Called only on explicit user action."""
+    """Actually open a PR via the GitHub REST API.
+
+    Called only on explicit user action. Uses ``POST /repos/{owner}/{repo}/pulls``.
+    """
     settings = settings or workspace.settings
     prep = prepare_pull_request(workspace, title=title, body=body, settings=settings)
     head = prep["head"]
     if not head:
         raise GitHubError("No current branch; create a branch first.")
-    res = _gh([
-        "pr", "create",
-        "--base", prep["base"],
-        "--head", head,
-        "--title", prep["title"],
-        "--body", prep["body"],
-    ], timeout=60)
-    if not res.success:
-        raise GitHubError(f"gh pr create failed: {res.stderr.strip()}")
-    # gh prints the new PR URL to stdout.
-    return {"pr_url": res.stdout.strip(), "prepared": prep}
+    owner = settings.github_owner or ""
+    repo = settings.github_repo or ""
+    if not (owner and repo):
+        raise GitHubError("GITHUB_OWNER / GITHUB_REPO are not configured.")
+    # Support "owner:branch" fork-head syntax.
+    head_ref = head if ":" in head else f"{owner}:{head}"
+    data = _github_api(
+        f"repos/{owner}/{repo}/pulls",
+        method="POST",
+        body={
+            "title": prep["title"],
+            "body": prep["body"],
+            "head": head_ref,
+            "base": prep["base"],
+        },
+        timeout=60,
+    )
+    pr_url = data.get("html_url", "") if isinstance(data, dict) else ""
+    return {"pr_url": pr_url, "prepared": prep}
