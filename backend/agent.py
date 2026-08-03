@@ -1,4 +1,5 @@
 """Agent: the event system and the interactive agent loop.
+import os
 
 The agent loop is the real workflow:
 
@@ -42,6 +43,10 @@ from github import GitHubError, clone_or_pull
 from models import EventType, TaskStatus
 from terminal import TerminalError, run_command, validate_command
 from workspace import Workspace, WorkspaceError
+try:
+    from github_api_workspace import GitHubAPIWorkspace
+except ImportError:
+    GitHubAPIWorkspace = None
 
 log = logging.getLogger("pk_ninja.agent")
 
@@ -603,52 +608,75 @@ class Agent:
         self._load_memory()
 
         # 1) Set up workspace + connect to repo.
-        ws = Workspace(self.task_id, settings=self.settings, repo_full=self.repo_full)
-        rt.workspace = ws
-        self.emit(EventType.info, "Workspace ready.",
-                  workspace=str(ws.root))
-
-        if self.repo_full or self.settings.github_repo_full():
-            try:
-                if self.repo_full and self.repo_full != self.settings.github_repo_full():
-                    owner, repo = self.repo_full.split("/", 1)
-                    self.settings = self.settings.model_copy(
-                        update={"github_owner": owner, "github_repo": repo}
+        # Try GitHub API workspace first (works on serverless without git)
+        ws = None
+        if GitHubAPIWorkspace and self.repo_full:
+            token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+            if token:
+                try:
+                    ws = GitHubAPIWorkspace(
+                        self.task_id, settings=self.settings, repo_full=self.repo_full
                     )
-                self.emit(EventType.info,
-                          f"Repository connected: {self.settings.github_repo_full()}",
-                          repo=self.settings.github_repo_full())
-                res = clone_or_pull(ws, self.settings)
-                if not res.success:
-                    # On serverless (Vercel) git is often missing — treat as
-                    # info, not error, since the agent continues in local mode.
-                    stderr_msg = res.stderr.strip()[:300]
-                    if "Command not found" in stderr_msg or "not installed" in stderr_msg:
+                    rt.workspace = ws
+                    self.emit(EventType.info, "Workspace ready (GitHub API mode).",
+                              workspace=str(ws.root))
+                    fetched = ws.fetch_repo_files()
+                    if fetched > 0:
                         self.emit(EventType.info,
-                                  f"Git not available: {stderr_msg}. "
-                                  "Running in local-only mode.")
+                                  f"Repository fetched via GitHub API ({fetched} files).")
                     else:
-                        self.emit(EventType.error,
-                                  f"Clone/pull failed: {stderr_msg}")
+                        self.emit(EventType.info,
+                                  "GitHub API fetch returned 0 files; falling back to local.")
+                        ws = None
+                except Exception as exc:
                     self.emit(EventType.info,
-                              "Continuing in local-only mode. The agent can still "
-                              "run tasks; repository features will be limited.")
-                else:
+                              f"GitHub API mode failed: {exc}; falling back to git/local.")
+                    ws = None
+
+        # Fallback to standard workspace with git
+        if ws is None:
+            ws = Workspace(self.task_id, settings=self.settings, repo_full=self.repo_full)
+            rt.workspace = ws
+            self.emit(EventType.info, "Workspace ready.",
+                      workspace=str(ws.root))
+
+            if self.repo_full or self.settings.github_repo_full():
+                try:
+                    if self.repo_full and self.repo_full != self.settings.github_repo_full():
+                        owner, repo = self.repo_full.split("/", 1)
+                        self.settings = self.settings.model_copy(
+                            update={"github_owner": owner, "github_repo": repo}
+                        )
                     self.emit(EventType.info,
-                              f"Repository cloned into workspace "
-                              f"({len(ws.list_files())} files).")
-            except GitHubError as exc:
-                self.emit(EventType.error,
-                          f"GitHub unavailable: {exc}. "
-                          "Continuing with empty workspace.")
-        else:
-            # Give the user actionable guidance instead of a bare info line so
-            # they know exactly how to enable repo-aware mode on Vercel/local.
-            self.emit(EventType.info,
-                      "No GitHub repo configured; running in local-only workspace. "
-                      "To enable repository features, set the GITHUB_REPOSITORY "
-                      "(owner/repo) and GITHUB_TOKEN environment variables, or "
-                      "connect your GitHub account in Settings.")
+                              f"Repository connected: {self.settings.github_repo_full()}",
+                              repo=self.settings.github_repo_full())
+                    res = clone_or_pull(ws, self.settings)
+                    if not res.success:
+                        stderr_msg = res.stderr.strip()[:300]
+                        if "Command not found" in stderr_msg or "not installed" in stderr_msg:
+                            self.emit(EventType.info,
+                                      f"Git not available: {stderr_msg}. "
+                                      "Running in local-only mode.")
+                        else:
+                            self.emit(EventType.error,
+                                      f"Clone/pull failed: {stderr_msg}")
+                        self.emit(EventType.info,
+                                  "Continuing in local-only mode. The agent can still "
+                                  "run tasks; repository features will be limited.")
+                    else:
+                        self.emit(EventType.info,
+                                  f"Repository cloned into workspace "
+                                  f"({len(ws.list_files())} files).")
+                except GitHubError as exc:
+                    self.emit(EventType.error,
+                              f"GitHub unavailable: {exc}. "
+                              "Continuing with empty workspace.")
+            else:
+                self.emit(EventType.info,
+                          "No GitHub repo configured; running in local-only workspace. "
+                          "To enable repository features, set the GITHUB_REPOSITORY "
+                          "(owner/repo) and GITHUB_TOKEN environment variables, or "
+                          "connect your GitHub account in Settings.")
 
         self._check_cancel(rt)
 

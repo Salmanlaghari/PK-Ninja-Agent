@@ -247,3 +247,5 @@ summarized_conversations/
 FINAL_REPORT_v1.1.0.md
 .vercel
 .env.vercel
+pk_ninja.db-shm
+pk_ninja.db-wal
