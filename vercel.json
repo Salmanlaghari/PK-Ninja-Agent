@@ -7,15 +7,8 @@
       "includeFiles": "backend/**,frontend/**,providers/**"
     }
   },
-  "rewrites": [
-    { "source": "/((?!.*\\.).*)", "destination": "/api/index" }
-  ],
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" }
-      ]
-    }
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/index.py" },
+    { "src": "/(.*)", "dest": "/api/index.py" }
   ]
 }
