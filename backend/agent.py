@@ -1,5 +1,4 @@
 """Agent: the event system and the interactive agent loop.
-import os
 
 The agent loop is the real workflow:
 
@@ -19,6 +18,8 @@ Interactive features added in v2:
   * Canonical task statuses: idle / running / success / failed / cancelled.
 """
 from __future__ import annotations
+
+import os
 
 import datetime as _dt
 import logging
