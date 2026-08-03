@@ -55,7 +55,10 @@ def _check_ai_provider(settings: Any) -> Dict[str, Any]:
     if provider == "local":
         return {"name": "ai_provider", "status": _OK,
                 "detail": "local (offline, no key required)"}
-    key = settings.effective_api_key() if hasattr(settings, "effective_api_key") else ""
+    if provider == "jules":
+        key = settings.effective_jules_key() if hasattr(settings, "effective_jules_key") else ""
+    else:
+        key = settings.effective_api_key() if hasattr(settings, "effective_api_key") else ""
     if not key:
         return {"name": "ai_provider", "status": _WARN,
                 "detail": f"{provider} selected but no API key set; will fall back to local"}
