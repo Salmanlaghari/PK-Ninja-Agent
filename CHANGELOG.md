@@ -2,6 +2,42 @@
 
 All notable changes to PK Ninja Agent are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — Multi-Provider AI System
+
+Production-grade multi-provider AI system with Xiaomi MiMo, per-provider API keys, provider validation, and enhanced Settings UI.
+
+### Added
+- **Xiaomi MiMo provider** (`providers/xiaomi_provider.py`) — new built-in adapter for Xiaomi's OpenAI-compatible endpoint at `https://api.xiaomimimo.com/v1`. Registered as a first-class builtin with `ProviderCapability(streaming=True, tool_calling=True, code_editing=True)`. Supports `MIMO_API_KEY` env var with fallback to `AI_API_KEY`.
+- **Per-provider API key storage** — expanded `SECRET_KINDS` in `backend/secret_store.py` with `jules_api_key`, `gemini_api_key`, `mimo_api_key`, `openai_api_key` for granular per-provider key management.
+- **Provider key management endpoints** (`backend/main.py`):
+  - `GET /api/providers/{name}/key-status` — check if a provider has a stored key
+  - `POST /api/providers/{name}/key` — save an API key for a specific provider
+  - `DELETE /api/providers/{name}/key` — remove a provider's stored key
+  - `POST /api/providers/{name}/validate` — lightweight health-check validation
+  - `POST /api/providers/{name}/test` — end-to-end connectivity test
+- **Enhanced Settings UI** (`frontend/index.html`, `frontend/app.js`, `frontend/style.css`) — per-provider API key configuration with show/hide toggle, validate button, test connection button, status indicator, last validation time, and clear error messages.
+- **Per-provider key resolution** (`backend/user_settings.py`) — priority: per-provider stored key → generic `ai_api_key` → server env var → built-in default.
+- **Integration tests**:
+  - `tests/test_xiaomi_provider.py` — 9 tests (init, manager integration, factory fallback)
+  - `tests/test_provider_validation.py` — 4 tests (validate, test connection)
+  - `tests/test_multi_provider.py` — 6 tests (all providers, capabilities, fallback, security)
+  - Updated `tests/test_provider_capabilities.py` — added Xiaomi capability tests
+- **`MIMO_API_KEY`** env var in `backend/config.py` and `.env.example`.
+
+### Fixed
+- **Jules API critical fix** — corrected Create Session request body from `userInput` to `prompt` (per official Jules REST API spec).
+- **Jules API fix** — corrected `sendMessage` body from `{text}` to `{prompt}`.
+- **Jules API fix** — corrected repository context from `gitRepository`/`targetBranch` to `sourceContext.githubRepoContext` structure.
+- **Jules activity parsing** — updated `_collect_agent_text` and `_collect_edits` to handle official API structure where event types are direct fields on activity objects, with backward-compatible fallback for legacy nested events.
+- **Test fix** — `test_get_instance_openai_without_key_returns_none` now properly clears `BUILTIN_AI_API_KEY`.
+
+### Changed
+- `_DEFAULT_BASES` in `backend/ai_provider.py` now includes `xiaomi` → `https://api.xiaomimimo.com/v1`.
+- `effective_api_key()` in `backend/config.py` now checks `mimo_api_key` in the resolution chain.
+- `providers/__init__.py` version bumped to `0.8.0`.
+
+---
+
 ## [Unreleased] — Vercel Serverless Deployment Configuration
 
 ### Added

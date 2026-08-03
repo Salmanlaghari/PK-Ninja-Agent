@@ -50,7 +50,14 @@ log = logging.getLogger("pk_ninja.secrets")
 # The canonical set of secret "kinds" we know how to store. Storing an
 # unknown kind is rejected so the table cannot be abused as a generic
 # key/value dump.
-SECRET_KINDS = frozenset({"ai_api_key", "github_token"})
+SECRET_KINDS = frozenset({
+    "ai_api_key",       # generic/legacy
+    "github_token",
+    "jules_api_key",    # Jules-specific
+    "gemini_api_key",   # Gemini-specific
+    "mimo_api_key",     # Xiaomi MiMo-specific
+    "openai_api_key",   # OpenAI-compatible-specific
+})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_secrets (

@@ -67,7 +67,7 @@ from models import (APIKeyIn, APIKeyStatus, ConfigOut, DashboardOut, DashboardTa
                     GitCommitRequest, GitPushRequest, GuestLoginRequest,
                     LoginResponse, PRPrepareRequest, ProviderActionRequest,
                     ProviderCapabilityOut, ProviderHealthOut,
-                    ProviderInfoOut, ProviderManagerStatusOut, QueueActionRequest,
+                    ProviderInfoOut, ProviderKeyIn, ProviderManagerStatusOut, QueueActionRequest,
                     QueueListOut, RecoveryActionRequest, ReorderRequest, RetryRequest, SessionCreateRequest, SessionOut, SettingsOut, SettingsUpdate,
                     SystemHealthComponent, SystemHealthOut, TaskCreate,
                     TaskQueueItem, TaskStatus, UserOut,
@@ -551,6 +551,143 @@ async def verify_api_key(user: User = Depends(current_user)) -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "provider": "local", "configured": False,
                 "error": str(exc)[:200]}
+
+
+# ── Per-provider key management (v1.5.0) ──────────────────────────────────
+# Map of provider names to their secret-store "kind" identifiers.
+_PROVIDER_KEY_MAP = {
+    "jules": "jules_api_key",
+    "gemini": "gemini_api_key",
+    "xiaomi": "mimo_api_key",
+    "openai": "openai_api_key",
+}
+
+
+def _provider_secret_kind(name: str) -> str:
+    """Resolve the secret-store kind for a provider name."""
+    return _PROVIDER_KEY_MAP.get(name, "ai_api_key")
+
+
+@app.get("/api/providers/{name}/key-status")
+async def api_provider_key_status(name: str, user: User = Depends(current_user)) -> dict:
+    """Return the key status for a specific provider."""
+    settings = get_settings()
+    kind = _provider_secret_kind(name)
+    has = await has_secret(settings, user, kind)
+    masked = ""
+    if has:
+        try:
+            masked = mask_secret(await get_secret(settings, user, kind) or "")
+        except Exception:
+            masked = "••••••••"
+    return {
+        "provider": name,
+        "has_key": has,
+        "masked_key": masked,
+    }
+
+
+@app.post("/api/providers/{name}/key")
+async def api_provider_save_key(name: str, body: ProviderKeyIn, user: User = Depends(current_user)) -> dict:
+    """Save an API key for a specific provider."""
+    settings = get_settings()
+    kind = _provider_secret_kind(name)
+    try:
+        await store_secret(settings, user, kind, body.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    masked = mask_secret(body.api_key)
+    log.info("api key stored for provider %s user %s (masked=%s)", name, _user_log_id(user), masked)
+    return {"ok": True, "provider": name, "masked_key": masked, "has_key": True}
+
+
+@app.delete("/api/providers/{name}/key")
+async def api_provider_delete_key(name: str, user: User = Depends(current_user)) -> dict:
+    """Remove the stored API key for a specific provider."""
+    settings = get_settings()
+    kind = _provider_secret_kind(name)
+    deleted = await delete_secret(settings, user, kind)
+    return {"ok": deleted, "provider": name, "has_key": False}
+
+
+@app.post("/api/providers/{name}/validate")
+async def api_provider_validate(name: str, user: User = Depends(current_user)) -> dict:
+    """Validate a provider's API key by making a lightweight test request.
+
+    For providers that support it, this makes a minimal API call to verify
+    the key works. Returns ok=True/False with details.
+    """
+    from providers import get_manager
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:
+        user_settings = settings
+
+    mgr = get_manager(user_settings)
+    inst = mgr.get_instance(name)
+    if inst is None:
+        return {
+            "ok": False,
+            "provider": name,
+            "error": "Provider not available or API key not configured.",
+        }
+
+    # Try a lightweight health check
+    try:
+        health = mgr.health_check(name)
+        ok = health.get("status") in ("healthy", "unknown")
+        return {
+            "ok": ok,
+            "provider": name,
+            "health": health,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": name,
+            "error": str(exc)[:200],
+        }
+
+
+@app.post("/api/providers/{name}/test")
+async def api_provider_test_connection(name: str, user: User = Depends(current_user)) -> dict:
+    """Test the connection to a provider by sending a minimal chat message.
+
+    This actually makes an API call to verify end-to-end connectivity.
+    """
+    from providers import get_manager
+    settings = get_settings()
+    try:
+        user_settings = await build_user_settings(settings, user)
+    except Exception:
+        user_settings = settings
+
+    mgr = get_manager(user_settings)
+    inst = mgr.get_instance(name)
+    if inst is None:
+        return {
+            "ok": False,
+            "provider": name,
+            "error": "Provider not available or API key not configured.",
+        }
+
+    try:
+        from ai_provider import ChatMessage
+        messages = [ChatMessage("user", "Say 'connection ok' in 3 words or fewer.")]
+        result = inst.chat(messages, stream=False)
+        return {
+            "ok": True,
+            "provider": name,
+            "model": getattr(result, "model", name),
+            "response_preview": (getattr(result, "text", "") or "")[:100],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": name,
+            "error": str(exc)[:200],
+        }
 
 
 def _user_log_id(user: User) -> str:

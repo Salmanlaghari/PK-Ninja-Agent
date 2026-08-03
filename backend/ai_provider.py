@@ -273,6 +273,7 @@ _DEFAULT_BASES: Dict[str, str] = {
     "together": "https://api.together.xyz/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "ollama": "http://localhost:11434/v1",
+    "xiaomi": "https://api.xiaomimimo.com/v1",
 }
 
 
@@ -751,15 +752,22 @@ class JulesProvider:
                         branch: Optional[str] = None) -> str:
         """Create a Jules session and return its name (id).
 
-        A *repoless* session (no ``gitRepository`` / ``targetBranch``) is used
-        for free-form chat / plan / analyze tasks. When ``repo_url`` is given,
-        a real repository session is created.
+        A *repoless* session (no ``sourceContext``) is used for free-form
+        chat / plan / analyze tasks. When ``repo_url`` is given, a session
+        with repository context is created.
+
+        Uses the official ``prompt`` field per the Jules REST API spec
+        (NOT ``userInput`` — that was a previous incorrect assumption).
         """
-        body: Dict[str, Any] = {"userInput": prompt}
+        body: Dict[str, Any] = {"prompt": prompt}
         if repo_url:
-            body["gitRepository"] = repo_url
+            body["sourceContext"] = {
+                "githubRepoContext": {
+                    "url": repo_url,
+                }
+            }
             if branch:
-                body["targetBranch"] = branch
+                body["sourceContext"]["githubRepoContext"]["startingBranch"] = branch
         data = self._request("POST", "/sessions", json_body=body)
         name = data.get("name")
         if not name:
@@ -779,9 +787,10 @@ class JulesProvider:
         self.diagnostics["plan_approvals"] += 1
 
     def _send_message(self, session_id: str, message: str) -> None:
+        # Official Jules API uses "prompt" field for sendMessage.
         self._request(
             "POST", f"/sessions/{session_id.split('/')[-1]}:sendMessage",
-            json_body={"text": message},
+            json_body={"prompt": message},
         )
 
     def _list_activities(self, session_id: str) -> List[Dict[str, Any]]:
@@ -826,10 +835,24 @@ class JulesProvider:
 
     # ── Artifact parsing ──────────────────────────────────────────────────
     def _collect_agent_text(self, session_id: str) -> str:
-        """Collect all agentMessaged activity text from a session."""
+        """Collect all agentMessaged activity text from a session.
+
+        Per the official Jules REST API, each activity has exactly one
+        populated event-type field (e.g. ``agentMessaged``, ``planGenerated``)
+        as a direct key on the activity object — not inside an ``events``
+        array.
+        """
         activities = self._list_activities(session_id)
         texts: List[str] = []
         for act in activities:
+            # Official API: event type is a direct field on the activity.
+            agent_msg = act.get("agentMessaged")
+            if agent_msg:
+                txt = agent_msg.get("agentMessage") or agent_msg.get("text") or ""
+                if txt:
+                    texts.append(txt)
+                continue
+            # Fallback: legacy nested events structure (backward compat).
             for ev in act.get("events", []) or []:
                 kind = ev.get("event") or ev.get("type")
                 if kind == "agentMessaged":
@@ -840,11 +863,22 @@ class JulesProvider:
         return "\n".join(texts).strip()
 
     def _collect_edits(self, session_id: str) -> List[dict]:
-        """Parse a Jules changeSet (gitPatch) into {path, content} edits."""
+        """Parse a Jules changeSet (gitPatch) into {path, content} edits.
+
+        Per the official Jules REST API, artifacts (including ``changeSet``)
+        are direct fields on the activity object.
+        """
         activities = self._list_activities(session_id)
         edits: List[dict] = []
         for act in activities:
+            # Official API: artifacts are direct fields on the activity.
             cs = act.get("changeSet")
+            if not cs:
+                # Also check artifacts array (alternate API structure).
+                for art in act.get("artifacts", []) or []:
+                    cs = art.get("changeSet")
+                    if cs:
+                        break
             if not cs:
                 continue
             patch = cs.get("gitPatch", {}) or {}
@@ -1084,6 +1118,14 @@ def get_provider(settings: Optional[Settings] = None) -> AIProvider:
         if settings.effective_jules_key():
             try:
                 return JulesProvider(settings)
+            except AIError:
+                pass
+        return LocalProvider()
+
+    if name == "xiaomi":
+        if settings.effective_api_key():
+            try:
+                return OpenAIProvider(settings, provider_hint="xiaomi")
             except AIError:
                 pass
         return LocalProvider()

@@ -36,17 +36,36 @@ def _is_jules_compatible(provider_name: str) -> bool:
 
 
 async def resolve_user_ai_key(settings: Settings, user: Any) -> str:
-    """Return the effective AI API key for ``user`` (plaintext, server-side)."""
-    # 1. Per-user stored key (highest priority).
+    """Return the effective AI API key for ``user`` (plaintext, server-side).
+
+    Resolution order (highest priority first):
+      1. Per-provider stored key (e.g. ``jules_api_key``, ``gemini_api_key``)
+      2. Generic ``ai_api_key`` stored key
+      3. Server env var (``JULES_API_KEY`` / ``AI_API_KEY`` / ``GEMINI_API_KEY``)
+      4. Built-in default key (``BUILTIN_AI_API_KEY``)
+    """
+    provider_name = await resolve_user_provider(settings, user)
     try:
         from secret_store import get_secret
+        # 1. Per-provider stored key (highest priority).
+        provider_key_map = {
+            "jules": "jules_api_key",
+            "gemini": "gemini_api_key",
+            "xiaomi": "mimo_api_key",
+            "openai": "openai_api_key",
+        }
+        provider_kind = provider_key_map.get(provider_name, "")
+        if provider_kind:
+            stored = await get_secret(settings, user, provider_kind)
+            if stored:
+                return stored
+        # 2. Generic ai_api_key stored key.
         stored = await get_secret(settings, user, "ai_api_key")
         if stored:
             return stored
     except Exception as exc:  # noqa: BLE001
         log.debug("could not read stored ai_api_key: %s", exc)
-    # 2. Env vars + 3. built-in default, via the existing effective_* helpers.
-    provider_name = await resolve_user_provider(settings, user)
+    # 3. Env vars + 4. built-in default, via the existing effective_* helpers.
     if _is_jules_compatible(provider_name):
         return settings.effective_jules_key()
     return settings.effective_api_key() or settings.builtin_ai_api_key or ""
@@ -93,10 +112,14 @@ async def build_user_settings(settings: Settings, user: Any) -> Settings:
     overrides: dict = {"ai_provider": provider_name}
     # Inject the resolved key into the right env-backed field depending on
     # the provider, so effective_jules_key() / effective_api_key() pick it up.
-    if _is_jules_compatible(provider_name):
-        overrides["jules_api_key"] = api_key
-    else:
-        overrides["ai_api_key"] = api_key
+    provider_field_map = {
+        "jules": "jules_api_key",
+        "gemini": "gemini_api_key",
+        "xiaomi": "mimo_api_key",
+        "openai": "openai_api_key",
+    }
+    field = provider_field_map.get(provider_name, "ai_api_key")
+    overrides[field] = api_key
     if github_token:
         overrides["github_token"] = github_token
 

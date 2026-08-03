@@ -392,6 +392,8 @@ const Settings = (() => {
         existing.remove();
       }
     });
+    // Show per-provider key config section for the selected provider.
+    if (typeof showProviderKeyConfig === "function") showProviderKeyConfig(name);
     // Update the API key hint to match the newly selected provider.
     updateApikeyHint();
   }
@@ -753,6 +755,20 @@ const Settings = (() => {
     // Enter key on the GitHub token input connects.
     const ghInput = $("set-gh-token");
     if (ghInput) ghInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connectGithub(); });
+    // Per-provider key management buttons (v2.0.0)
+    const bPkSave = $("provider-key-save");
+    const bPkRemove = $("provider-key-remove");
+    const bPkValidate = $("provider-key-validate");
+    const bPkTest = $("provider-key-test");
+    const bPkToggle = $("provider-key-toggle");
+    if (bPkSave) bPkSave.addEventListener("click", saveProviderKey);
+    if (bPkRemove) bPkRemove.addEventListener("click", removeProviderKey);
+    if (bPkValidate) bPkValidate.addEventListener("click", validateProviderKey);
+    if (bPkTest) bPkTest.addEventListener("click", testProviderConnection);
+    if (bPkToggle) bPkToggle.addEventListener("click", toggleProviderKeyVisibility);
+    // Enter key on per-provider key input saves.
+    const pkInput = $("provider-key-input");
+    if (pkInput) pkInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveProviderKey(); });
     // Click outside the box closes the modal.
     const overlay = $("settings-modal");
     if (overlay) overlay.addEventListener("click", (e) => {
@@ -1247,6 +1263,163 @@ const Dashboard = (() => {
   return { init, load, open, close };
 })();
 
+
+// Per-provider key management (v2.0.0)
+let selectedProviderForKey = null;
+
+async function loadProviderKeyStatus(providerName) {
+  try {
+    const r = await fetch(`/api/providers/${providerName}/key-status`);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function showProviderKeyConfig(providerName) {
+  selectedProviderForKey = providerName;
+  const section = $("provider-key-config");
+  if (!section) return;
+
+  // Hide for local/mock provider (no key needed)
+  if (providerName === "local" || providerName === "mock") {
+    section.hidden = true;
+    return;
+  }
+
+  section.hidden = false;
+  $("provider-key-title").textContent = `${providerName.toUpperCase()} API Key`;
+  $("provider-key-result").textContent = "";
+  $("provider-key-last-check").textContent = "";
+
+  const status = await loadProviderKeyStatus(providerName);
+  const dot = $("provider-key-dot");
+  const statusText = $("provider-key-status-text");
+  const masked = $("provider-key-masked");
+  const removeBtn = $("provider-key-remove");
+  const input = $("provider-key-input");
+
+  if (status && status.has_key) {
+    dot.className = "apikey-dot ok";
+    statusText.textContent = "Key configured";
+    masked.textContent = status.masked_key || "";
+    removeBtn.hidden = false;
+    input.placeholder = "Enter new key to replace";
+  } else {
+    dot.className = "apikey-dot none";
+    statusText.textContent = "No key set";
+    masked.textContent = "";
+    removeBtn.hidden = true;
+    input.placeholder = `Paste your ${providerName} API key`;
+  }
+  input.value = "";
+}
+
+async function saveProviderKey() {
+  if (!selectedProviderForKey) return;
+  const input = $("provider-key-input");
+  const key = input.value.trim();
+  if (!key) return;
+
+  const result = $("provider-key-result");
+  result.textContent = "Saving...";
+  result.style.color = "";
+
+  try {
+    const r = await fetch(`/api/providers/${selectedProviderForKey}/key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: key }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      result.textContent = "✓ Key saved successfully.";
+      result.style.color = "#4caf50";
+      input.value = "";
+      await showProviderKeyConfig(selectedProviderForKey);
+    } else {
+      result.textContent = "✗ Failed to save key.";
+      result.style.color = "#f44336";
+    }
+  } catch (e) {
+    result.textContent = `✗ Error: ${e.message}`;
+    result.style.color = "#f44336";
+  }
+}
+
+async function removeProviderKey() {
+  if (!selectedProviderForKey) return;
+  const result = $("provider-key-result");
+  result.textContent = "Removing...";
+
+  try {
+    await fetch(`/api/providers/${selectedProviderForKey}/key`, { method: "DELETE" });
+    result.textContent = "✓ Key removed.";
+    result.style.color = "#4caf50";
+    await showProviderKeyConfig(selectedProviderForKey);
+  } catch (e) {
+    result.textContent = `✗ Error: ${e.message}`;
+    result.style.color = "#f44336";
+  }
+}
+
+async function validateProviderKey() {
+  if (!selectedProviderForKey) return;
+  const result = $("provider-key-result");
+  result.textContent = "Validating...";
+  result.style.color = "";
+
+  try {
+    const r = await fetch(`/api/providers/${selectedProviderForKey}/validate`, { method: "POST" });
+    const data = await r.json();
+    const lastCheck = $("provider-key-last-check");
+    const now = new Date().toLocaleTimeString();
+
+    if (data.ok) {
+      result.textContent = `✓ Valid! Provider: ${data.provider}, Status: ${data.health?.status || "ok"}`;
+      result.style.color = "#4caf50";
+      lastCheck.textContent = `Last validated: ${now}`;
+    } else {
+      result.textContent = `✗ Invalid: ${data.error || "Validation failed"}`;
+      result.style.color = "#f44336";
+      lastCheck.textContent = `Last check: ${now}`;
+    }
+  } catch (e) {
+    result.textContent = `✗ Error: ${e.message}`;
+    result.style.color = "#f44336";
+  }
+}
+
+async function testProviderConnection() {
+  if (!selectedProviderForKey) return;
+  const result = $("provider-key-result");
+  result.textContent = "Testing connection...";
+  result.style.color = "";
+
+  try {
+    const r = await fetch(`/api/providers/${selectedProviderForKey}/test`, { method: "POST" });
+    const data = await r.json();
+    const lastCheck = $("provider-key-last-check");
+    const now = new Date().toLocaleTimeString();
+
+    if (data.ok) {
+      result.textContent = `✓ Connected! Model: ${data.model}. Response: "${data.response_preview}"`;
+      result.style.color = "#4caf50";
+      lastCheck.textContent = `Last tested: ${now}`;
+    } else {
+      result.textContent = `✗ Failed: ${data.error || "Connection test failed"}`;
+      result.style.color = "#f44336";
+      lastCheck.textContent = `Last check: ${now}`;
+    }
+  } catch (e) {
+    result.textContent = `✗ Error: ${e.message}`;
+    result.style.color = "#f44336";
+  }
+}
+
+function toggleProviderKeyVisibility() {
+  const input = $("provider-key-input");
+  input.type = input.type === "password" ? "text" : "password";
+}
 
 let currentTaskId = null;
 let ws = null;            // WebSocket connection (preferred)

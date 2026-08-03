@@ -112,8 +112,17 @@ def test_get_instance_local(fresh_manager):
     assert inst.name == "local"
 
 
-def test_get_instance_openai_without_key_returns_none(fresh_manager):
+def test_get_instance_openai_without_key_returns_none(fresh_manager, monkeypatch):
     # No API key in test env -> OpenAIAdapter construction fails -> None.
+    # Clear all possible key sources so OpenAI genuinely has no key.
+    from config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.setenv("BUILTIN_AI_API_KEY", "")
+    get_settings.cache_clear()
+    fresh_manager.settings = get_settings()
     inst = fresh_manager.get_instance("openai")
     assert inst is None
     info = fresh_manager.get_info("openai")

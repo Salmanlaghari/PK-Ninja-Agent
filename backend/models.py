@@ -558,3 +558,9 @@ class SensitivePathOut(BaseModel):
 
     sensitive: bool
     path: str
+
+
+# ── Per-provider API key (v1.5.0) ─────────────────────────────────────────
+class ProviderKeyIn(BaseModel):
+    """Save an API key for a specific provider (stored encrypted)."""
+    api_key: str = Field(..., min_length=1, max_length=400)

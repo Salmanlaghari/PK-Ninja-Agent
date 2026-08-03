@@ -195,9 +195,9 @@ class TestJulesHttpLayer:
         method, url, body, params = client.calls[0]
         assert method == "POST"
         assert url.endswith("/sessions")
-        assert body["userInput"] == "do something"
-        # repoless session has no gitRepository
-        assert "gitRepository" not in body
+        assert body["prompt"] == "do something"
+        # repoless session has no sourceContext
+        assert "sourceContext" not in body
         assert p.diagnostics["sessions_created"] == 1
 
     def test_create_session_with_repo(self, monkeypatch):
@@ -211,8 +211,8 @@ class TestJulesHttpLayer:
             p._create_session("fix bug", repo_url="https://github.com/x/y",
                               branch="main")
         _, _, body, _ = client.calls[0]
-        assert body["gitRepository"] == "https://github.com/x/y"
-        assert body["targetBranch"] == "main"
+        assert body["sourceContext"]["githubRepoContext"]["url"] == "https://github.com/x/y"
+        assert body["sourceContext"]["githubRepoContext"]["startingBranch"] == "main"
 
     def test_retry_on_429_then_succeeds(self, monkeypatch):
         s = _settings_with_jules_key(monkeypatch)

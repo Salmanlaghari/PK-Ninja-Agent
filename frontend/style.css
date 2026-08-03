@@ -1680,6 +1680,15 @@ textarea:focus, .task-input:focus, .term-input:focus, .settings-input:focus, .lo
   font-weight: 600;
 }
 
+/* ── Per-provider key config (v2.0.0) ──────────────────────────────────── */
+#provider-key-config { margin-top: 12px; }
+.apikey-dot.ok { background: #4caf50; }
+.apikey-dot.none { background: #666; }
+.apikey-dot.error { background: #f44336; }
+.apikey-status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.apikey-masked { font-family: monospace; font-size: 12px; opacity: 0.7; }
+.apikey-hint { font-size: 12px; opacity: 0.8; margin-top: 4px; }
+
 /* ── Theme Variants ───────────────────────────────────────────────────── */
 body.theme-light {
   --surface: rgba(255, 255, 255, 0.90);

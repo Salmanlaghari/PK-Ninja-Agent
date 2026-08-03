@@ -380,22 +380,27 @@
           <input id="set-provider" type="hidden" value="local" />
         </div>
 
-        <!-- AI API Key section -->
-        <div class="settings-group">
-          <label class="settings-label" for="set-apikey">AI API Key</label>
-          <div id="apikey-status-row" class="apikey-status-row">
-            <span id="apikey-status-dot" class="apikey-dot none"></span>
-            <span id="apikey-status-text" class="apikey-status-text">No key set</span>
-            <span id="apikey-masked" class="apikey-masked"></span>
+        <!-- Per-Provider API Key Configuration (v2.0.0) -->
+        <div class="settings-group" id="provider-key-config" hidden>
+          <label class="settings-label" id="provider-key-title">API Key</label>
+          <div id="provider-key-status-row" class="apikey-status-row">
+            <span id="provider-key-dot" class="apikey-dot none"></span>
+            <span id="provider-key-status-text" class="apikey-status-text">No key set</span>
+            <span id="provider-key-masked" class="apikey-masked"></span>
           </div>
           <div class="settings-row apikey-input-row">
-            <input id="set-apikey" class="settings-input" type="password"
-              placeholder="Paste your AI provider API key" autocomplete="off" spellcheck="false" />
-            <button id="apikey-save" class="btn primary btn-tiny">Save key</button>
-            <button id="apikey-remove" class="btn ghost btn-tiny" hidden>Remove</button>
+            <input id="provider-key-input" class="settings-input" type="password"
+              placeholder="Paste your API key" autocomplete="off" spellcheck="false" />
+            <button id="provider-key-toggle" class="btn btn-tiny ghost" title="Show/Hide">👁</button>
+            <button id="provider-key-save" class="btn primary btn-tiny">Save</button>
+            <button id="provider-key-remove" class="btn ghost btn-tiny" hidden>Remove</button>
           </div>
-          <div id="apikey-hint" class="apikey-hint"></div>
-          <div id="apikey-status" class="settings-status" hidden></div>
+          <div class="settings-row" style="margin-top: 8px;">
+            <button id="provider-key-validate" class="btn ghost btn-tiny">✓ Validate Key</button>
+            <button id="provider-key-test" class="btn ghost btn-tiny">🔌 Test Connection</button>
+          </div>
+          <div id="provider-key-result" class="apikey-hint"></div>
+          <div id="provider-key-last-check" class="apikey-hint" style="font-size:11px;opacity:0.7;"></div>
         </div>
 
         <!-- GitHub Connect section -->

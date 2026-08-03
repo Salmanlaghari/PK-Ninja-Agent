@@ -81,6 +81,7 @@ def _register_builtins() -> None:
     from .openai_provider import OpenAIAdapter
     from .gemini_provider import GeminiAdapter
     from .jules_provider import JulesAdapter
+    from .xiaomi_provider import XiaomiAdapter
     from .mock_provider import MockProvider
 
     register_adapter(
@@ -103,6 +104,13 @@ def _register_builtins() -> None:
         display_name="Gemini (OpenAI-compatible endpoint)",
         description=GeminiAdapter.description,
         capability=GeminiAdapter.capability,
+        requires_api_key=True,
+    )
+    register_adapter(
+        "xiaomi", XiaomiAdapter,
+        display_name="Xiaomi MiMo",
+        description=XiaomiAdapter.description,
+        capability=XiaomiAdapter.capability,
         requires_api_key=True,
     )
     register_adapter(

@@ -38,6 +38,7 @@ from .manager import (
 from .local_provider import LocalAdapter
 from .openai_provider import OpenAIAdapter
 from .gemini_provider import GeminiAdapter
+from .xiaomi_provider import XiaomiAdapter
 from .jules_provider import JulesAdapter
 from .mock_provider import MockProvider, MockAdapter
 
@@ -54,6 +55,7 @@ __all__ = [
     "LocalAdapter",
     "OpenAIAdapter",
     "GeminiAdapter",
+    "XiaomiAdapter",
     "JulesAdapter",
     "MockProvider",
     "MockAdapter",

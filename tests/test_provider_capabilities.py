@@ -19,6 +19,7 @@ from providers import (
     LocalAdapter,
     OpenAIAdapter,
     GeminiAdapter,
+    XiaomiAdapter,
     MockProvider,
     reset_manager,
 )
@@ -53,6 +54,15 @@ def test_gemini_adapter_capabilities():
     assert cap.code_editing is True
 
 
+def test_xiaomi_adapter_capabilities():
+    cap = XiaomiAdapter.capability
+    assert cap.streaming is True
+    assert cap.tool_calling is True
+    assert cap.code_editing is True
+    assert XiaomiAdapter.requires_api_key is True
+    assert XiaomiAdapter.name == "xiaomi"
+
+
 def test_mock_provider_capabilities_default():
     from providers.mock_provider import MockConfig
     mp = MockProvider(config=MockConfig())
@@ -79,6 +89,8 @@ def test_capability_to_dict_with_values():
 def test_manager_capability_matches_adapter(mgr):
     assert mgr.capability("openai").tool_calling is True
     assert mgr.capability("local").tool_calling is False
+    assert mgr.capability("xiaomi").streaming is True
+    assert mgr.capability("xiaomi").tool_calling is True
 
 
 def test_providers_with_code_editing(mgr):
@@ -86,9 +98,22 @@ def test_providers_with_code_editing(mgr):
     assert "local" in ce
     assert "openai" in ce
     assert "mock" in ce
+    assert "xiaomi" in ce
+    assert "jules" in ce
 
 
 def test_providers_with_capability_respects_disabled(mgr):
     mgr.disable("mock")
     streaming = mgr.providers_with_capability("streaming")
     assert "mock" not in streaming
+
+
+def test_xiaomi_capability_to_dict(mgr):
+    cap = mgr.capability("xiaomi")
+    d = cap.to_dict()
+    assert d["streaming"] is True
+    assert d["tool_calling"] is True
+    assert d["code_editing"] is True
+    # context_window and max_output are 0 → None in to_dict
+    assert d["context_window"] is None
+    assert d["max_output"] is None

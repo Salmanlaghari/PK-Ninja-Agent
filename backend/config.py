@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
 
+    # ── Xiaomi MiMo (OpenAI-compatible) ──────────────────────────────
+    mimo_api_key: str = Field(default="", alias="MIMO_API_KEY")
+
     # ── Built-in default AI API key (v1.2.0) ──────────────────────────────
     # A built-in, provider-agnostic key shipped with the app so that users
     # who do not have their own API key can still use the AI directly. The
@@ -273,7 +276,7 @@ class Settings(BaseSettings):
 
     def effective_api_key(self) -> str:
         """Resolve the API key from either the new or legacy env vars."""
-        return self.ai_api_key or self.gemini_api_key
+        return self.ai_api_key or self.gemini_api_key or self.mimo_api_key
 
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
