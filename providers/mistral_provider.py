@@ -44,7 +44,6 @@ class MistralAdapter:
         try:
             if settings is not None:
                 api_key = getattr(settings, "ai_api_key", "") or ""
-                model = getattr(settings, "ai_model", "") or "mistral-small-latest"
                 if api_key:
                     self._inner = OpenAIProvider(
                         settings,

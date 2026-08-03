@@ -1,18 +1,22 @@
 {
-  "buildCommand": null,
   "installCommand": "pip install -r requirements.txt",
   "framework": null,
   "outputDirectory": ".",
   "functions": {
     "api/index.py": {
+      "runtime": "python3.12",
       "maxDuration": 300,
       "memory": 3009,
-      "includeFiles": "backend/**,frontend/**,requirements.txt"
+      "includeFiles": [
+        "backend/",
+        "frontend/",
+        "providers/",
+        "requirements.txt"
+      ]
     }
   },
   "rewrites": [
-    { "source": "/((?!.*\\.).*)", "destination": "/api/index" },
-    { "source": "/(.*)", "destination": "/api/index" }
+    { "source": "/((?!.*\\.).*)", "destination": "/api/index" }
   ],
   "headers": [
     {

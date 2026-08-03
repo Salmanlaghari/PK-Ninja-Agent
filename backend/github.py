@@ -347,8 +347,8 @@ def list_repo_issues(owner: str, repo: str,
             "created_at": item.get("created_at", ""),
             "updated_at": item.get("updated_at", ""),
             "url": item.get("html_url", ""),
-            "labels": [l.get("name", "") if isinstance(l, dict) else str(l)
-                       for l in (item.get("labels") or [])],
+            "labels": [label.get("name", "") if isinstance(label, dict) else str(label)
+                       for label in (item.get("labels") or [])],
         })
     return issues
 

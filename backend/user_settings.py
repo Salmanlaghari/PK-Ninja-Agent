@@ -16,9 +16,9 @@ preference (``ai_provider``), falling back to the env ``AI_PROVIDER``.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from config import Settings, get_settings
+from config import Settings
 
 log = logging.getLogger("pk_ninja.user_settings")
 

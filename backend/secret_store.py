@@ -35,10 +35,8 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import hashlib
-import hmac
 import json
 import logging
-import os
 import secrets as _secrets
 from pathlib import Path
 from typing import Any, Dict, Optional

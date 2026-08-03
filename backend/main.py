@@ -51,11 +51,8 @@ from auth import (AuthError, InvalidTokenError, User,
 from config import get_settings, is_serverless
 from github import GitHubError, create_pull_request, prepare_pull_request, repo_info
 from settings_store import (get_settings_for_user, update_settings_for_user)
-from secret_store import (delete_secret, get_secret, has_secret, list_secrets,
-                          mask_secret, store_secret)
-from user_settings import (build_user_settings, resolve_user_ai_key,
-                            resolve_user_provider, resolve_user_github_token,
-                            using_builtin_key)
+from secret_store import (delete_secret, get_secret, has_secret, mask_secret, store_secret)
+from user_settings import (build_user_settings, resolve_user_provider, using_builtin_key)
 from release_checks import system_health as _system_health
 from workspace_manager import (WorkspaceManagerError, create_workspace,
                                delete_workspace, list_workspaces,
@@ -1489,7 +1486,7 @@ async def api_create_task(body: TaskCreate,
         agent = Agent(task_id, body.description, repo_full=repo, settings=user_settings)
         try:
             agent.run()
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("Agent run failed (serverless sync)")
         status = agent.rt.status.value if agent.rt else "failed"
         return {"task_id": task_id, "status": status,

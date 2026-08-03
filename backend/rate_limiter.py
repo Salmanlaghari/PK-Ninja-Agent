@@ -18,9 +18,8 @@ import logging
 import os
 import secrets
 import time
-from collections import defaultdict
 from functools import wraps
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 logger = logging.getLogger("pk_ninja.rate_limiter")
 

@@ -165,7 +165,6 @@ def load_queue(scheduler: "TaskScheduler") -> int:
         # Interrupted RUNNING tasks go back to QUEUED
         if status == "running":
             status = "queued"
-        from scheduler import QueueStatus
         item = scheduler.enqueue(
             task_id=task_id,
             description=row["description"],

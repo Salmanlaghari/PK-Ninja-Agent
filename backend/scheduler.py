@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import heapq
 import itertools
-import json
 import logging
 import threading
 from dataclasses import dataclass, field

@@ -612,8 +612,8 @@ class Agent:
         # Try GitHub API workspace first (works on serverless without git)
         ws = None
         if GitHubAPIWorkspace and self.repo_full:
-            token = (os.environ.get("GITHUB_TOKEN", "") or 
-                     os.environ.get("GH_TOKEN", "") or 
+            token = (os.environ.get("GITHUB_TOKEN", "") or
+                     os.environ.get("GH_TOKEN", "") or
                      getattr(self.settings, "github_token", ""))
             if token:
                 try:
@@ -780,7 +780,6 @@ class Agent:
         project_map_str = ""
         try:
             import asyncio
-            import aiosqlite
             from db import connect as _db_connect
             from indexing import get_project_map
             async def _get_map():
@@ -1084,7 +1083,6 @@ class Agent:
         if name == "search_files":
             return ws.search_files(args.get("pattern", "*"), args.get("text"))
         elif name == "search_symbols":
-            import aiosqlite
             from db import connect as _db_connect
             from indexing import search_symbols
             try:
@@ -1136,7 +1134,6 @@ class Agent:
             res = run_command(args.get("command"), ws, rt=rt)
             return {"success": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
         elif name == "indexing":
-            import aiosqlite
             from db import connect as _db_connect
             from indexing import index_workspace
             try:

@@ -83,13 +83,13 @@ jobs:
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
         env:
-          FLY_API_TOKEN: *** secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Get app URL
         id: url
         run: echo "URL=https://$(flyctl status --json | python3 -c 'import sys,json; print(json.load(sys.stdin)["App"]["Name"])').fly.dev" >> $GITHUB_OUTPUT
         env:
-          FLY_API_TOKEN: *** secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Verify health
         run: |
