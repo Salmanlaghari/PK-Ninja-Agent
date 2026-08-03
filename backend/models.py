@@ -67,6 +67,7 @@ def normalize_status(status: str) -> str:
 class TaskCreate(BaseModel):
     description: str = Field(..., min_length=1, max_length=4000)
     repository: Optional[str] = None  # "owner/repo" override; else uses config
+    depends_on: Optional[List[str]] = None  # task IDs this task depends on
 
 
 class TaskSummary(BaseModel):

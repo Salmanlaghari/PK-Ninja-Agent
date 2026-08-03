@@ -313,6 +313,13 @@ app = FastAPI(title="PK Ninja Agent", version="1.5.0")
 
 # ── Production middleware & lifecycle ──────────────────────────────────────
 app.add_middleware(RequestLoggingMiddleware)
+
+# Rate limiting (v1.2.0)
+try:
+    from rate_limiter import create_rate_limit_middleware
+    app.add_middleware(create_rate_limit_middleware())
+except Exception as exc:
+    log.info("Rate limiter setup skipped: %s", exc)
 register_shutdown_handlers(app)
 
 # Metrics (optional — graceful degradation if prometheus_client not installed)
@@ -1470,6 +1477,7 @@ async def api_create_task(body: TaskCreate,
             description=body.description,
             repo_full=repo,
             enqueued_at=_dt.datetime.utcnow().timestamp(),
+            depends_on=body.depends_on,
         )
         return {"task_id": task_id, "status": item.status.value,
                 "repository": repo, "queued": True}
@@ -2314,3 +2322,33 @@ async def index() -> FileResponse:
 
 
 app.mount("/static", StaticFiles(directory=str(_frontend_dir)), name="static")
+
+
+# ── CSRF & Rate Limit endpoints (v1.2.0) ────────────────────────────────────
+
+@app.get("/api/security/csrf-token")
+async def _csrf_token(request: Request):
+    """Generate a CSRF token for the current session."""
+    try:
+        from rate_limiter import csrf_token_for_session
+        session_id = request.cookies.get("session", "")
+        token = csrf_token_for_session(session_id)
+        return {"csrf_token": token}
+    except ImportError:
+        return {"csrf_token": "disabled"}
+
+
+@app.get("/api/security/rate-limit-status")
+async def _rate_limit_status(request: Request):
+    """Check current rate limit status for the client."""
+    try:
+        from rate_limiter import get_general_limiter, get_auth_limiter
+        client_ip = request.client.host if request.client else "unknown"
+        _, general_headers = get_general_limiter().check(f"{client_ip}:general")
+        _, auth_headers = get_auth_limiter().check(f"{client_ip}:auth")
+        return {
+            "general": general_headers,
+            "auth": auth_headers,
+        }
+    except ImportError:
+        return {"status": "disabled"}

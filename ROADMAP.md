@@ -20,21 +20,32 @@ The provider package was bumped to v0.7.0 and the application to v1.1.0. Jules i
 
 ---
 
-## v1.2.0+ — Future Directions
-
-Ideas and directions for post-1.1.0 development. These are exploratory and not committed.
+## v1.2.0 — Delivered
 
 ### Autonomous execution hardening
-- **Worker persistence.** The background worker is in-memory (daemon threads). Persist the worker queue to SQLite so in-flight tasks survive a process restart and are picked up by the recovery system automatically.
-- **Scheduler persistence.** Persist the scheduler queue so enqueued-but-not-started tasks survive a restart.
-- **Task dependencies.** Allow tasks to declare dependencies (task B starts only after task A completes) for multi-step autonomous workflows.
+- ✅ **Worker persistence.** Queue state persists to SQLite via scheduler_persistence.py. On restart, QUEUED/RUNNING tasks are recovered automatically.
+- ✅ **Scheduler persistence.** All enqueue/status-change operations write-through to the scheduler_queue table.
+- ✅ **Task dependencies.** Tasks can declare depends_on; dependent tasks enter WAITING status and are promoted when deps complete.
+
+### Authentication hardening
+- ✅ **Rate limiting.** Per-IP token bucket rate limiter with configurable limits. Auth endpoints get stricter limits. Response headers included.
+- ✅ **CSRF protection.** HMAC-based CSRF tokens bound to session ID. New /api/security/csrf-token endpoint.
+
+### AI provider ecosystem
+- ✅ **Mistral provider.** New MistralAdapter in providers/mistral_provider.py using OpenAI-compatible API.
+
+---
+
+## v1.3.0+ — Future Directions
+
+Ideas and directions for post-1.2.0 development. These are exploratory and not committed.
+
+### Autonomous execution hardening
 - **Cron / scheduled tasks.** Time-based task triggers (nightly audits, scheduled builds) on top of the existing priority queue.
 
 ### Authentication hardening
 - **OAuth flow.** Replace token-based GitHub login with a proper OAuth app flow (callback, state validation, refresh tokens) for multi-user deployments.
 - **Server-side session revocation.** Add an optional server-side session store (SQLite) to support explicit revocation and session listing.
-- **Rate limiting.** Add per-user rate limiting on auth endpoints to mitigate brute-force attempts.
-- **CSRF protection.** Add CSRF tokens for state-changing endpoints when cookie-based auth is introduced.
 
 ### Authorization & multi-tenancy
 - **Role-based access control.** Introduce roles (admin, contributor, viewer) and per-workspace permissions for multi-user deployments.

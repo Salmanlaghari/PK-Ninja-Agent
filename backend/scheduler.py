@@ -15,17 +15,15 @@ Design goals
   reorder, with full status tracking.
 * **DB-aware** — queue state is mirrored to the existing ``tasks`` table so
   the history / recovery subsystems can reason about queued jobs.
-
-The scheduler is intentionally *dumb* about *how* a task runs: it only decides
-*when* a task should start. The actual execution is delegated to
-:func:`backend.agent.start_task` (direct mode) or the background Worker
-(:mod:`backend.worker`, Phase 2).
+* **Persistent** — v1.2.0: queue state survives restarts via SQLite.
+* **Dependencies** — v1.2.0: tasks can declare dependencies on other tasks.
 """
 
 from __future__ import annotations
 
 import heapq
 import itertools
+import json
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -46,6 +44,7 @@ class QueueStatus(str, Enum):
     CANCELLED = "cancelled"  # operator cancelled before/during execution
     DONE = "done"            # finished (success or failure handled by task status)
     FAILED = "failed"        # exhausted retries and still failing
+    WAITING = "waiting"      # waiting for dependencies to complete
 
 
 # ── Queue entry ────────────────────────────────────────────────────────────
@@ -75,6 +74,7 @@ class QueueItem:
     enqueued_at: float
     started_at: Optional[float] = None
     error: Optional[str] = None
+    depends_on: List[str] = field(default_factory=list)
     # internal monotonic sequence used for stable FIFO ordering in list_items
     _seq: int = 0
 
@@ -90,13 +90,38 @@ class QueueItem:
             "enqueued_at": self.enqueued_at,
             "started_at": self.started_at,
             "error": self.error,
+            "depends_on": self.depends_on,
         }
+
+
+# ── Persistence helpers (lazy import to avoid circular deps) ──────────────
+
+def _persist_enqueue(item: QueueItem) -> None:
+    try:
+        from scheduler_persistence import persist_enqueue
+        persist_enqueue(item)
+    except ImportError:
+        pass
+
+def _persist_status(task_id: str, status: str, **kw: Any) -> None:
+    try:
+        from scheduler_persistence import persist_status
+        persist_status(task_id, status, **kw)
+    except ImportError:
+        pass
+
+def _persist_remove(task_id: str) -> None:
+    try:
+        from scheduler_persistence import persist_remove
+        persist_remove(task_id)
+    except ImportError:
+        pass
 
 
 # ── Scheduler ──────────────────────────────────────────────────────────────
 
 class TaskScheduler:
-    """In-process priority task scheduler.
+    """In-process priority task scheduler with persistence and dependencies.
 
     The scheduler maintains:
 
@@ -144,30 +169,49 @@ class TaskScheduler:
         priority: Optional[int] = None,
         max_retries: Optional[int] = None,
         enqueued_at: float,
+        depends_on: Optional[List[str]] = None,
     ) -> QueueItem:
-        """Add a task to the queue. Returns the created :class:`QueueItem`."""
+        """Add a task to the queue. Returns the created :class:`QueueItem`.
+
+        If ``depends_on`` is provided, the task will not be dispatched until
+        all dependencies have status ``DONE``.
+        """
         prio = self._default_priority if priority is None else priority
         retries = self._default_retries if max_retries is None else max_retries
+        deps = list(depends_on or [])
+        # Check if dependencies are already satisfied
+        initial_status = QueueStatus.QUEUED
+        if deps:
+            all_done = all(
+                self._items.get(d) is not None and self._items[d].status == QueueStatus.DONE
+                for d in deps
+            )
+            if not all_done:
+                initial_status = QueueStatus.WAITING
+
         item = QueueItem(
             task_id=task_id,
             description=description,
             repo_full=repo_full,
             priority=prio,
-            status=QueueStatus.QUEUED,
+            status=initial_status,
             retries=0,
             max_retries=retries,
             enqueued_at=enqueued_at,
+            depends_on=deps,
         )
         with self._lock:
             if task_id in self._items:
                 raise ValueError(f"task {task_id} already in queue")
             item._seq = next(self._counter)
             self._items[task_id] = item
-            heapq.heappush(
-                self._heap,
-                _HeapEntry(priority=prio, sequence=item._seq, task_id=task_id),
-            )
-        logger.info("scheduler: enqueued task=%s priority=%s", task_id, prio)
+            if initial_status == QueueStatus.QUEUED:
+                heapq.heappush(
+                    self._heap,
+                    _HeapEntry(priority=prio, sequence=item._seq, task_id=task_id),
+                )
+        logger.info("scheduler: enqueued task=%s priority=%s deps=%s", task_id, prio, deps)
+        _persist_enqueue(item)
         return item
 
     # ── pop next ───────────────────────────────────────────────────────────
@@ -177,8 +221,11 @@ class TaskScheduler:
 
         Skips entries that were paused/cancelled after enqueueing (their
         ``_HeapEntry`` stays in the heap but is discarded lazily here).
+        Also promotes WAITING tasks whose dependencies are now satisfied.
         """
         with self._lock:
+            # First, try to promote any WAITING tasks whose deps are done
+            self._promote_waiting()
             while self._heap:
                 entry = heapq.heappop(self._heap)
                 item = self._items.get(entry.task_id)
@@ -186,14 +233,39 @@ class TaskScheduler:
                     continue  # removed
                 if item.status == QueueStatus.QUEUED:
                     item.status = QueueStatus.RUNNING
+                    _persist_status(item.task_id, "running", started_at=item.started_at)
                     return item
                 # otherwise skip (paused / cancelled / done / failed)
             return None
 
+    def _promote_waiting(self) -> None:
+        """Promote WAITING tasks to QUEUED if all dependencies are DONE."""
+        to_promote = []
+        for item in self._items.values():
+            if item.status != QueueStatus.WAITING:
+                continue
+            if not item.depends_on:
+                to_promote.append(item)
+                continue
+            all_done = all(
+                self._items.get(d) is not None and self._items[d].status == QueueStatus.DONE
+                for d in item.depends_on
+            )
+            if all_done:
+                to_promote.append(item)
+        for item in to_promote:
+            item.status = QueueStatus.QUEUED
+            heapq.heappush(
+                self._heap,
+                _HeapEntry(priority=item.priority, sequence=next(self._counter), task_id=item.task_id),
+            )
+            _persist_status(item.task_id, "queued")
+            logger.info("scheduler: promoted task=%s (deps satisfied)", item.task_id)
+
     def peek_next(self) -> Optional[QueueItem]:
         """Return the next ready task *without* removing it."""
         with self._lock:
-            # rebuild a transient view without mutating the heap
+            self._promote_waiting()
             for entry in sorted(self._heap):
                 item = self._items.get(entry.task_id)
                 if item and item.status == QueueStatus.QUEUED:
@@ -207,8 +279,9 @@ class TaskScheduler:
             item = self._items.get(task_id)
             if item is None:
                 return None
-            if item.status in (QueueStatus.QUEUED, QueueStatus.RUNNING):
+            if item.status in (QueueStatus.QUEUED, QueueStatus.RUNNING, QueueStatus.WAITING):
                 item.status = QueueStatus.PAUSED
+                _persist_status(task_id, "paused")
                 logger.info("scheduler: paused task=%s", task_id)
             return item
 
@@ -218,16 +291,24 @@ class TaskScheduler:
             if item is None:
                 return None
             if item.status == QueueStatus.PAUSED:
-                item.status = QueueStatus.QUEUED
-                # re-insert into heap so it can be picked up again
-                heapq.heappush(
-                    self._heap,
-                    _HeapEntry(
-                        priority=item.priority,
-                        sequence=next(self._counter),
-                        task_id=task_id,
-                    ),
-                )
+                # Check if deps are satisfied
+                if item.depends_on and not all(
+                    self._items.get(d) is not None and self._items[d].status == QueueStatus.DONE
+                    for d in item.depends_on
+                ):
+                    item.status = QueueStatus.WAITING
+                    _persist_status(task_id, "waiting")
+                else:
+                    item.status = QueueStatus.QUEUED
+                    heapq.heappush(
+                        self._heap,
+                        _HeapEntry(
+                            priority=item.priority,
+                            sequence=next(self._counter),
+                            task_id=task_id,
+                        ),
+                    )
+                    _persist_status(task_id, "queued")
                 logger.info("scheduler: resumed task=%s", task_id)
             return item
 
@@ -238,6 +319,7 @@ class TaskScheduler:
                 return None
             if item.status not in (QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.CANCELLED):
                 item.status = QueueStatus.CANCELLED
+                _persist_status(task_id, "cancelled")
                 logger.info("scheduler: cancelled task=%s", task_id)
             return item
 
@@ -262,6 +344,7 @@ class TaskScheduler:
                     task_id=task_id,
                 ),
             )
+            _persist_status(task_id, "queued", retries=item.retries)
             logger.info("scheduler: retried task=%s attempt=%s", task_id, item.retries)
             return item
 
@@ -271,6 +354,9 @@ class TaskScheduler:
             if item is None:
                 return None
             item.status = QueueStatus.DONE
+            _persist_status(task_id, "done")
+            # Check if any WAITING tasks can now be promoted
+            self._promote_waiting()
             return item
 
     def mark_failed(self, task_id: str, error: str) -> Optional[QueueItem]:
@@ -293,7 +379,10 @@ class TaskScheduler:
                         task_id=task_id,
                     ),
                 )
+                _persist_status(task_id, "queued", retries=item.retries)
                 logger.info("scheduler: auto-retry task=%s attempt=%s", task_id, item.retries)
+            else:
+                _persist_status(task_id, "failed", error=error)
             return item
 
     def reorder(self, task_id: str, priority: int) -> Optional[QueueItem]:
@@ -312,13 +401,17 @@ class TaskScheduler:
                         task_id=task_id,
                     ),
                 )
+            _persist_status(task_id, item.status.value)
             logger.info("scheduler: reordered task=%s priority=%s", task_id, priority)
             return item
 
     def remove(self, task_id: str) -> bool:
         """Fully drop a task from the scheduler. Returns True if it existed."""
         with self._lock:
-            return self._items.pop(task_id, None) is not None
+            existed = self._items.pop(task_id, None) is not None
+        if existed:
+            _persist_remove(task_id)
+        return existed
 
     # ── introspection ──────────────────────────────────────────────────────
 
@@ -373,8 +466,12 @@ def init_scheduler(
     *,
     default_priority: int = 5,
     default_retries: int = 1,
+    recover: bool = True,
 ) -> TaskScheduler:
-    """Create and store the scheduler singleton. Idempotent."""
+    """Create and store the scheduler singleton. Idempotent.
+
+    If ``recover`` is True (default), loads persisted tasks from SQLite.
+    """
     global _SCHEDULER
     with _SCHEDULER_LOCK:
         if _SCHEDULER is None:
@@ -382,6 +479,13 @@ def init_scheduler(
                 default_priority=default_priority,
                 default_retries=default_retries,
             )
+            if recover:
+                try:
+                    from scheduler_persistence import init_persistence_schema, load_queue
+                    init_persistence_schema()
+                    load_queue(_SCHEDULER)
+                except ImportError:
+                    pass
         else:
             _SCHEDULER.configure(
                 default_priority=default_priority,

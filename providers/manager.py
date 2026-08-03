@@ -83,6 +83,7 @@ def _register_builtins() -> None:
     from .jules_provider import JulesAdapter
     from .xiaomi_provider import XiaomiAdapter
     from .anthropic_provider import AnthropicAdapter
+    from .mistral_provider import MistralAdapter
     from .mock_provider import MockProvider
 
     register_adapter(
@@ -126,6 +127,13 @@ def _register_builtins() -> None:
         display_name="Anthropic Claude",
         description=AnthropicAdapter.description,
         capability=AnthropicAdapter.capability,
+        requires_api_key=True,
+    )
+    register_adapter(
+        "mistral", MistralAdapter,
+        display_name="Mistral AI",
+        description=MistralAdapter.description,
+        capability=MistralAdapter.capability,
         requires_api_key=True,
     )
     register_adapter(

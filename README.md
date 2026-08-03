@@ -888,3 +888,43 @@ The `/api/tasks` endpoint now calls `build_user_settings()` so the agent uses th
 - The existing secret-leak guard tests continue to pass: `/api/settings` and `/api/config` responses are checked for substrings `api_key`, `token`, `password`, `secret` and must not contain them
 - `ConfigOut` field names deliberately avoid those substrings (`uses_default_credential`, `default_credential_available`)
 - The encrypted secret store is separate from the non-secret settings store, which only stores preferences (theme, ai_provider, workspace, etc.)
+
+## 19. v1.2.0 — Persistence, Dependencies, Security & Mistral
+
+This release adds SQLite-backed scheduler persistence, task dependencies, rate limiting, CSRF protection, and Mistral AI as a new provider.
+
+### What's new
+
+**Scheduler & Worker Persistence**
+The in-memory task scheduler now persists its queue to a `scheduler_queue` SQLite table. On restart, QUEUED and RUNNING tasks are automatically recovered. All status changes write through to the database. Graceful degradation ensures the system works even if the table doesn't exist.
+
+**Task Dependencies**
+Tasks can now declare dependencies on other tasks via `depends_on: ["task_id"]`. Tasks with unmet dependencies enter `WAITING` status and are automatically promoted to `QUEUED` when all dependencies complete. This enables multi-step autonomous workflows.
+
+**Rate Limiting**
+Per-IP token bucket rate limiter protects all API endpoints. Auth endpoints get stricter limits (100 req/min vs 1000 req/min general). Response headers include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `Retry-After`.
+
+**CSRF Protection**
+HMAC-based CSRF tokens bound to session IDs protect state-changing endpoints. New endpoint: `GET /api/security/csrf-token`.
+
+**Mistral AI Provider**
+New adapter at `providers/mistral_provider.py` using Mistral's OpenAI-compatible API. Registered as "mistral" in the Provider Manager. Requires `AI_API_KEY` with a Mistral API key.
+
+### API Changes
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/security/csrf-token` | GET | guest | Generate a CSRF token for the current session |
+| `/api/security/rate-limit-status` | GET | guest | Check current rate limit state |
+
+`POST /api/tasks` now accepts `depends_on` (list of task IDs) in the request body.
+
+### Configuration
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `RATE_LIMIT_REQUESTS` | 1000 | General rate limit (requests per window) |
+| `RATE_LIMIT_WINDOW` | 60 | Rate limit window in seconds |
+| `AUTH_RATE_LIMIT_REQUESTS` | 100 | Auth endpoint rate limit |
+| `AUTH_RATE_LIMIT_WINDOW` | 60 | Auth rate limit window |
+| `CSRF_SECRET` | (auto-generated) | Secret for CSRF token HMAC |

@@ -382,3 +382,52 @@ The original web-based IDE coding workspace with task queue, repository explorer
 - Vanilla JS/CSS/HTML frontend served at `/static/`.
 - Real terminal execution in sandboxed workspaces.
 - GitHub integration (clone, branch, commit, push, PR preparation).
+
+## v1.2.0 — Persistence, Dependencies, Security & Mistral
+
+### New Features
+
+**Scheduler & Worker Persistence (SQLite)**
+- Queue state now persists to the `scheduler_queue` SQLite table
+- On restart, QUEUED/RUNNING tasks are automatically recovered (RUNNING → QUEUED)
+- All enqueue/status-change/remove operations write-through to DB
+- Graceful degradation: if the table is missing, operations continue in-memory
+- New module: `backend/scheduler_persistence.py`
+
+**Task Dependencies**
+- Tasks can now declare dependencies via `depends_on: ["task_id_1", "task_id_2"]`
+- Tasks with unmet dependencies enter `WAITING` status
+- When dependencies complete, waiting tasks are automatically promoted to `QUEUED`
+- New `QueueStatus.WAITING` enum value
+- `POST /api/tasks` now accepts `depends_on` field in the request body
+
+**Rate Limiting**
+- Per-IP token bucket rate limiter for all API endpoints
+- Stricter limits for auth endpoints (100 req/min vs 1000 req/min general)
+- Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`
+- Configurable via env vars: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`, `AUTH_RATE_LIMIT_REQUESTS`, `AUTH_RATE_LIMIT_WINDOW`
+- New module: `backend/rate_limiter.py`
+
+**CSRF Protection**
+- HMAC-based CSRF tokens bound to session ID
+- New endpoint: `GET /api/security/csrf-token`
+- `validate_csrf_token()` for state-changing endpoints
+- Configurable secret via `CSRF_SECRET` env var
+
+**Mistral AI Provider**
+- New adapter: `providers/mistral_provider.py` (`MistralAdapter`)
+- OpenAI-compatible API at `https://api.mistral.ai/v1`
+- Registered in Provider Manager as "mistral"
+- Supports streaming, code editing
+- Requires `AI_API_KEY` with Mistral API key
+
+**Rate Limit Status Endpoint**
+- `GET /api/security/rate-limit-status` — check current rate limit state
+
+### Bug Fixes
+- Fixed `test_factory_falls_back_to_local_when_no_key` — now clears `MIMO_API_KEY` and `BUILTIN_AI_API_KEY`
+- Fixed CSRF token generation/validation mismatch
+
+### Tests
+- 20 new tests covering persistence, dependencies, rate limiting, CSRF, and Mistral
+- Total: 650 passing tests (630 baseline + 20 new)
