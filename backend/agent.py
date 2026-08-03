@@ -620,8 +620,16 @@ class Agent:
                           repo=self.settings.github_repo_full())
                 res = clone_or_pull(ws, self.settings)
                 if not res.success:
-                    self.emit(EventType.error,
-                              f"Clone/pull failed: {res.stderr.strip()[:300]}")
+                    # On serverless (Vercel) git is often missing — treat as
+                    # info, not error, since the agent continues in local mode.
+                    stderr_msg = res.stderr.strip()[:300]
+                    if "Command not found" in stderr_msg or "not installed" in stderr_msg:
+                        self.emit(EventType.info,
+                                  f"Git not available: {stderr_msg}. "
+                                  "Running in local-only mode.")
+                    else:
+                        self.emit(EventType.error,
+                                  f"Clone/pull failed: {stderr_msg}")
                     self.emit(EventType.info,
                               "Continuing in local-only mode. The agent can still "
                               "run tasks; repository features will be limited.")
@@ -660,30 +668,37 @@ class Agent:
         self.emit(EventType.info, "Indexing repository workspace...")
         try:
             import asyncio
-            import aiosqlite
             from db import connect as _db_connect
             from indexing import index_workspace
+
             async def _run_idx():
-                async with await _db_connect(self.settings.db_path) as conn:
-                    # Ensure tables exist
+                conn = await _db_connect(self.settings.db_path)
+                try:
                     await conn.executescript(
                         "CREATE TABLE IF NOT EXISTS repo_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, mtime REAL NOT NULL, indexed_at TEXT NOT NULL, UNIQUE(task_id, path));"
                         "CREATE TABLE IF NOT EXISTS repo_symbols (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, path TEXT NOT NULL, symbol_name TEXT NOT NULL, symbol_type TEXT NOT NULL, line_no INTEGER NOT NULL);"
                     )
                     await conn.commit()
                     return await index_workspace(self.task_id, ws, conn)
+                finally:
+                    await conn.close()
 
             try:
-                stats = asyncio.run(_run_idx())
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        future = pool.submit(asyncio.run, _run_idx())
+                        stats = future.result(timeout=60)
+                else:
+                    stats = loop.run_until_complete(_run_idx())
             except RuntimeError:
-                loop = asyncio.new_event_loop()
-                stats = loop.run_until_complete(_run_idx())
-                loop.close()
+                stats = asyncio.run(_run_idx())
 
             self.emit(EventType.info, f"Repository indexed: {stats['total']} files, "
                       f"{stats['added']} added, {stats['updated']} updated, {stats['deleted']} deleted.")
         except Exception as exc:
-            self.emit(EventType.error, f"Indexing failed: {exc}")
+            self.emit(EventType.info, f"Indexing skipped: {exc}")
 
         # 2) UNDERSTAND & RELEVANCY SELECTION (Repository Context Engine)
         self.emit(EventType.analyzing, "Understanding the task and repository.")

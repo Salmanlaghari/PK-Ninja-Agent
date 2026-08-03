@@ -1719,3 +1719,32 @@ body.theme-cyber .login-input {
   color: var(--text);
   border-color: var(--border);
 }
+
+/* ── GitHub OAuth Button (Google Sign-up style) ────────────── */
+.github-oauth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 20px;
+  background: #24292f;
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
+}
+.github-oauth-btn:hover {
+  background: #2d333b;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  transform: translateY(-1px);
+}
+.github-oauth-btn:active {
+  transform: translateY(0);
+}
+.github-oauth-btn .github-icon {
+  flex-shrink: 0;
+}
