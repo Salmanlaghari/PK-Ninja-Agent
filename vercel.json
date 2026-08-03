@@ -1,7 +1,5 @@
 {
   "installCommand": "pip install -r requirements.txt",
-  "framework": null,
-  "outputDirectory": ".",
   "functions": {
     "api/index.py": {
       "runtime": "python3.12",
@@ -10,8 +8,7 @@
       "includeFiles": [
         "backend/",
         "frontend/",
-        "providers/",
-        "requirements.txt"
+        "providers/"
       ]
     }
   },
