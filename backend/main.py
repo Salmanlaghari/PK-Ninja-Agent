@@ -1481,6 +1481,19 @@ async def api_create_task(body: TaskCreate,
         )
         return {"task_id": task_id, "status": item.status.value,
                 "repository": repo, "queued": True}
+    # On serverless (Vercel), run the agent synchronously so the function
+    # stays alive until the agent completes. Background threads are frozen
+    # after the HTTP response is sent on serverless runtimes.
+    if is_serverless():
+        from agent import Agent
+        agent = Agent(task_id, body.description, repo_full=repo, settings=user_settings)
+        try:
+            agent.run()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Agent run failed (serverless sync)")
+        status = agent.rt.status.value if agent.rt else "failed"
+        return {"task_id": task_id, "status": status,
+                "repository": repo, "sync": True}
     start_task(task_id, body.description, repo_full=repo, settings=user_settings)
     return {"task_id": task_id, "status": TaskStatus.running.value,
             "repository": repo}
