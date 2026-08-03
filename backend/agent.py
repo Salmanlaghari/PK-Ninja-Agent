@@ -612,11 +612,14 @@ class Agent:
         # Try GitHub API workspace first (works on serverless without git)
         ws = None
         if GitHubAPIWorkspace and self.repo_full:
-            token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+            token = (os.environ.get("GITHUB_TOKEN", "") or 
+                     os.environ.get("GH_TOKEN", "") or 
+                     getattr(self.settings, "github_token", ""))
             if token:
                 try:
                     ws = GitHubAPIWorkspace(
-                        self.task_id, settings=self.settings, repo_full=self.repo_full
+                        self.task_id, settings=self.settings, repo_full=self.repo_full,
+                        token=token
                     )
                     rt.workspace = ws
                     self.emit(EventType.info, "Workspace ready (GitHub API mode).",

@@ -23,13 +23,13 @@ from workspace import Workspace, CommandResult
 log = logging.getLogger("pk_ninja.github_api_workspace")
 
 
-def _github_token() -> str:
-    return os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+def _github_token(token: str = "") -> str:
+    return token or os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
 
 
-def _github_api(path: str, timeout: int = 10) -> object:
+def _github_api(path: str, timeout: int = 10, token: str = "") -> object:
     """Call GitHub REST API directly."""
-    token = _github_token()
+    token = _github_token(token)
     if not token:
         raise RuntimeError("No GitHub token")
     url = f"https://api.github.com/{path.lstrip('/')}"
@@ -47,9 +47,11 @@ class GitHubAPIWorkspace(Workspace):
     """Workspace that uses GitHub API for file listing when git is unavailable."""
 
     def __init__(self, task_id: str, root: Optional[Path] = None,
-                 settings=None, repo_full: Optional[str] = None) -> None:
+                 settings=None, repo_full: Optional[str] = None,
+                 token: Optional[str] = None) -> None:
         super().__init__(task_id, root=root, settings=settings, repo_full=repo_full)
         self._repo_full = repo_full or (settings.github_repo_full() if settings else "")
+        self._token = token or ""
         self._fetched = False
         self._file_paths: List[str] = []
         self._file_shas: dict = {}  # path -> sha
@@ -61,11 +63,12 @@ class GitHubAPIWorkspace(Workspace):
         Returns the number of files in the tree. Files are NOT downloaded
         yet — they are fetched on-demand via read_file().
         """
-        if not self._repo_full or not _github_token():
+        token = _github_token(self._token)
+        if not self._repo_full or not token:
             return 0
 
         try:
-            tree_data = _github_api(f"repos/{self._repo_full}/git/trees/{ref}")
+            tree_data = _github_api(f"repos/{self._repo_full}/git/trees/{ref}", token=token)
         except Exception as exc:
             log.error("GitHub tree fetch failed: %s", exc)
             return 0
@@ -113,7 +116,7 @@ class GitHubAPIWorkspace(Workspace):
         if self._fetched and rel in self._file_shas:
             sha = self._file_shas[rel]
             try:
-                blob = _github_api(f"repos/{self._repo_full}/git/blobs/{sha}", timeout=10)
+                blob = _github_api(f"repos/{self._repo_full}/git/blobs/{sha}", timeout=10, token=_github_token(self._token))
                 content_b64 = blob.get("content", "")
                 if blob.get("encoding") == "base64" and content_b64:
                     content = base64.b64decode(content_b64).decode("utf-8", errors="replace")
