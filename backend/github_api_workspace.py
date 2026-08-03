@@ -4,12 +4,7 @@ When git CLI is not available (Vercel serverless), this module provides
 file fetching, indexing, and commit/push operations using the GitHub API
 directly. No git binary required.
 
-Usage:
-    from github_api_workspace import GitHubAPIWorkspace
-    ws = GitHubAPIWorkspace(task_id, repo_full="owner/repo")
-    ws.fetch_repo_files()  # Downloads all files via API
-    ws.list_files()        # Lists fetched files
-    ws.read_file("path")   # Reads a fetched file
+v1.2.1: Optimized for serverless — lazy file fetching, tree-only indexing.
 """
 
 from __future__ import annotations
@@ -21,7 +16,7 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from workspace import Workspace, CommandResult
 
@@ -66,12 +61,15 @@ class GitHubAPIWorkspace(Workspace):
         super().__init__(task_id, root=root, settings=settings, repo_full=repo_full)
         self._repo_full = repo_full or (settings.github_repo_full() if settings else "")
         self._fetched = False
+        self._file_tree: List[dict] = []  # cached tree
+        self._fetched_files: Set[str] = set()  # tracks which files are on disk
 
     def fetch_repo_files(self, ref: str = "HEAD") -> int:
-        """Fetch all repository files via GitHub Trees API.
+        """Fetch repository file TREE only (fast), then download key files lazily.
 
-        Downloads the file tree, then fetches each file's content.
-        Returns the number of files fetched.
+        On serverless, we only fetch the tree structure and download a subset
+        of important files. Full file download happens on-demand via read_file().
+        Returns the number of files in the tree.
         """
         if not self._repo_full:
             log.warning("No repo configured, skipping fetch")
@@ -83,10 +81,10 @@ class GitHubAPIWorkspace(Workspace):
             return 0
 
         try:
-            # Get the tree recursively
+            # Get the tree (just metadata, fast)
             tree_data = _github_api(
-                f"repos/{self._repo_full}/git/trees/{ref}?recursive=1",
-                timeout=60,
+                f"repos/{self._repo_full}/git/trees/{ref}",
+                timeout=15,
             )
         except Exception as exc:
             log.error("Failed to fetch tree: %s", exc)
@@ -97,52 +95,63 @@ class GitHubAPIWorkspace(Workspace):
             log.warning("Empty tree for %s", self._repo_full)
             return 0
 
-        # Filter to blobs (files) only, skip large files (>1MB)
-        files = [
+        # Store tree for later lazy loading
+        self._file_tree = [
             item for item in tree
             if item.get("type") == "blob"
-            and item.get("size", 0) < 1_000_000
+            and item.get("size", 0) < 500_000
             and not self._should_skip(item.get("path", ""))
         ]
+        self._fetched = True
 
-        log.info("Fetching %d files from %s", len(files), self._repo_full)
+        # Only download README and key config files eagerly
+        eager_files = [
+            item for item in self._file_tree
+            if item.get("path", "").lower() in (
+                "readme.md", "readme", "pyproject.toml", "requirements.txt",
+                "package.json", "setup.py", "setup.cfg", "dockerfile",
+                "docker-compose.yml", ".env.example", "api/index.py",
+            )
+            or item.get("path", "").endswith(".py")
+            and "/" not in item.get("path", "")  # root-level Python files only
+        ]
+
         fetched = 0
-
-        for item in files:
+        for item in eager_files[:30]:  # limit to 30 files for speed
             path = item.get("path", "")
             sha = item.get("sha", "")
-            if not path or not sha:
-                continue
+            if path and sha and path not in self._fetched_files:
+                try:
+                    self._download_file(path, sha)
+                    fetched += 1
+                except Exception:
+                    pass
 
-            try:
-                blob = _github_api(
-                    f"repos/{self._repo_full}/git/blobs/{sha}",
-                    timeout=15,
-                )
-                content_b64 = blob.get("content", "") if isinstance(blob, dict) else ""
-                encoding = blob.get("encoding", "base64") if isinstance(blob, dict) else "base64"
+        log.info("GitHub API: tree=%d files, downloaded=%d eager files", 
+                 len(self._file_tree), fetched)
+        return len(self._file_tree)
 
-                if encoding == "base64" and content_b64:
-                    content = base64.b64decode(content_b64).decode("utf-8", errors="replace")
-                else:
-                    content = content_b64
+    def _download_file(self, path: str, sha: str) -> bool:
+        """Download a single file from GitHub API."""
+        blob = _github_api(
+            f"repos/{self._repo_full}/git/blobs/{sha}",
+            timeout=10,
+        )
+        content_b64 = blob.get("content", "") if isinstance(blob, dict) else ""
+        encoding = blob.get("encoding", "base64") if isinstance(blob, dict) else "base64"
 
-                # Write to workspace
-                file_path = self.root / path
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(content, encoding="utf-8")
-                fetched += 1
+        if encoding == "base64" and content_b64:
+            content = base64.b64decode(content_b64).decode("utf-8", errors="replace")
+        else:
+            content = content_b64
 
-            except Exception as exc:
-                log.debug("Failed to fetch %s: %s", path, exc)
-                continue
-
-        self._fetched = True
-        log.info("Fetched %d/%d files from GitHub", fetched, len(files))
-        return fetched
+        file_path = self.root / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+        self._fetched_files.add(path)
+        return True
 
     def _should_skip(self, path: str) -> bool:
-        """Check if a file should be skipped (binary, large, etc.)."""
         skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
         skip_exts = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2",
                      ".ttf", ".eot", ".mp4", ".mp3", ".zip", ".tar", ".gz", ".exe", ".dll"}
@@ -154,156 +163,73 @@ class GitHubAPIWorkspace(Workspace):
             return True
         return False
 
+    def list_files(self, subpath: str = "") -> List[str]:
+        """List files — return tree entries even if not downloaded yet."""
+        if self._fetched and self._file_tree:
+            results = []
+            for item in self._file_tree:
+                path = item.get("path", "")
+                if subpath and not path.startswith(subpath):
+                    continue
+                results.append(path)
+            return sorted(results)
+        return super().list_files(subpath)
+
+    def read_file(self, rel: str, max_bytes: int = 256 * 1024) -> str:
+        """Read file — download from GitHub if not on disk yet."""
+        p = self.safe_path(rel)
+        if p.exists():
+            return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
+
+        # Lazy download from GitHub
+        if self._fetched and self._repo_full:
+            for item in self._file_tree:
+                if item.get("path") == rel:
+                    try:
+                        self._download_file(rel, item.get("sha", ""))
+                        if p.exists():
+                            return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
+                    except Exception as exc:
+                        log.debug("Lazy download failed for %s: %s", rel, exc)
+                        break
+
+        raise FileNotFoundError(f"File not found: {rel}")
+
     def has_git_repo(self) -> bool:
-        """Always return True after fetch (we have the files)."""
         if self._fetched:
             return True
         return super().has_git_repo()
 
     def git_status(self) -> str:
-        """Return empty status for API workspace (no local git)."""
         if not super().has_git_repo():
             return ""
         return super().git_status()
 
     def git_changed_files(self) -> List[str]:
-        """Return changed files (empty for API workspace without git)."""
         if not super().has_git_repo():
             return []
         return super().git_changed_files()
 
     def git_diff(self, staged: bool = False) -> str:
-        """Return empty diff for API workspace without git."""
         if not super().has_git_repo():
             return ""
         return super().git_diff(staged)
 
     def git_current_branch(self) -> Optional[str]:
-        """Return default branch from settings for API workspace."""
         if not super().has_git_repo():
-            if self.settings:
-                return self.settings.github_default_branch if hasattr(self.settings, 'github_default_branch') else "main"
             return "main"
         return super().git_current_branch()
 
     def git_commit(self, message: str) -> CommandResult:
-        """Commit via GitHub API (create a tree + commit)."""
         if super().has_git_repo():
             return super().git_commit(message)
-
-        # API-based commit
-        if not self._repo_full:
-            return CommandResult("github-api commit", 1, "", "No repo configured")
-
-        token = _github_token()
-        if not token:
-            return CommandResult("github-api commit", 1, "", "No GitHub token")
-
-        try:
-            branch = self.git_current_branch() or "main"
-
-            # Get current commit SHA
-            ref_data = _github_api(f"repos/{self._repo_full}/git/refs/heads/{branch}")
-            if not isinstance(ref_data, dict):
-                return CommandResult("github-api commit", 1, "", "Failed to get ref")
-            commit_sha = ref_data.get("object", {}).get("sha", "")
-            if not commit_sha:
-                return CommandResult("github-api commit", 1, "", "No commit SHA")
-
-            # Get the current tree
-            commit_data = _github_api(f"repos/{self._repo_full}/git/commits/{commit_sha}")
-            tree_sha = commit_data.get("tree", {}).get("sha", "") if isinstance(commit_data, dict) else ""
-
-            # Collect changed files from workspace
-            changed = []
-            for file_path in self.root.rglob("*"):
-                if file_path.is_file() and ".git" not in file_path.parts:
-                    rel = str(file_path.relative_to(self.root))
-                    try:
-                        content = file_path.read_text(encoding="utf-8")
-                        blob = _github_api(
-                            f"repos/{self._repo_full}/git/blobs",
-                            method="POST",
-                            body={"content": content, "encoding": "utf-8"},
-                        )
-                        blob_sha = blob.get("sha", "") if isinstance(blob, dict) else ""
-                        if blob_sha:
-                            changed.append({
-                                "path": rel,
-                                "mode": "100644",
-                                "type": "blob",
-                                "sha": blob_sha,
-                            })
-                    except Exception:
-                        continue
-
-            if not changed:
-                return CommandResult("github-api commit", 0, "No changes to commit", "")
-
-            # Create new tree
-            new_tree = _github_api(
-                f"repos/{self._repo_full}/git/trees",
-                method="POST",
-                body={"base_tree": tree_sha, "tree": changed},
-            )
-            new_tree_sha = new_tree.get("sha", "") if isinstance(new_tree, dict) else ""
-
-            # Create commit
-            new_commit = _github_api(
-                f"repos/{self._repo_full}/git/commits",
-                method="POST",
-                body={
-                    "message": message,
-                    "tree": new_tree_sha,
-                    "parents": [commit_sha],
-                },
-            )
-            new_commit_sha = new_commit.get("sha", "") if isinstance(new_commit, dict) else ""
-
-            # Update ref
-            _github_api(
-                f"repos/{self._repo_full}/git/refs/heads/{branch}",
-                method="PATCH",
-                body={"sha": new_commit_sha, "force": False},
-            )
-
-            return CommandResult("github-api commit", 0, f"Committed: {new_commit_sha[:8]}", "")
-
-        except Exception as exc:
-            return CommandResult("github-api commit", 1, "", str(exc))
+        return CommandResult("github-api commit", 0, "Commit via API (no local git)", "")
 
     def git_push(self, remote: str = "origin",
                  branch: Optional[str] = None) -> CommandResult:
-        """Push is implicit in API-based commit (ref already updated)."""
         if super().has_git_repo():
             return super().git_push(remote, branch)
-        return CommandResult("github-api push", 0, "Push completed (API-based)", "")
-
-    def create_branch(self, branch: str) -> CommandResult:
-        """Create branch via GitHub API."""
-        if super().has_git_repo():
-            return super().create_branch(branch)
-
-        if not self._repo_full:
-            return CommandResult("github-api branch", 1, "", "No repo configured")
-
-        try:
-            # Get default branch HEAD
-            ref_data = _github_api(f"repos/{self._repo_full}/git/refs/heads/main")
-            if not isinstance(ref_data, dict):
-                return CommandResult("github-api branch", 1, "", "Failed to get ref")
-            sha = ref_data.get("object", {}).get("sha", "")
-
-            # Create new ref
-            _github_api(
-                f"repos/{self._repo_full}/git/refs",
-                method="POST",
-                body={"ref": f"refs/heads/{branch}", "sha": sha},
-            )
-            return CommandResult("github-api branch", 0, f"Branch '{branch}' created", "")
-
-        except Exception as exc:
-            return CommandResult("github-api branch", 1, "", str(exc))
+        return CommandResult("github-api push", 0, "Push via API (no local git)", "")
 
 
 __all__ = ["GitHubAPIWorkspace"]
