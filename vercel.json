@@ -3,8 +3,8 @@
   "functions": {
     "api/index.py": {
       "runtime": "python3.12",
-      "maxDuration": 300,
-      "memory": 3009,
+      "maxDuration": 60,
+      "memory": 2048,
       "includeFiles": "backend/**,frontend/**,providers/**"
     }
   },
