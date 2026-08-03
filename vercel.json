@@ -2,7 +2,6 @@
   "installCommand": "pip install -r requirements.txt",
   "functions": {
     "api/index.py": {
-      "runtime": "python3.12",
       "maxDuration": 60,
       "memory": 2048,
       "includeFiles": "backend/**,frontend/**,providers/**"
