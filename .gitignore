@@ -245,3 +245,5 @@ summarized_conversations/
 .psiphon_data/
 .screenshots/
 FINAL_REPORT_v1.1.0.md
+.vercel
+.env.vercel

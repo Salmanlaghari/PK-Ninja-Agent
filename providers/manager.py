@@ -82,6 +82,7 @@ def _register_builtins() -> None:
     from .gemini_provider import GeminiAdapter
     from .jules_provider import JulesAdapter
     from .xiaomi_provider import XiaomiAdapter
+    from .anthropic_provider import AnthropicAdapter
     from .mock_provider import MockProvider
 
     register_adapter(
@@ -118,6 +119,13 @@ def _register_builtins() -> None:
         display_name="Jules (official async coding agent)",
         description=JulesAdapter.description,
         capability=JulesAdapter.capability,
+        requires_api_key=True,
+    )
+    register_adapter(
+        "anthropic", AnthropicAdapter,
+        display_name="Anthropic Claude",
+        description=AnthropicAdapter.description,
+        capability=AnthropicAdapter.capability,
         requires_api_key=True,
     )
     register_adapter(

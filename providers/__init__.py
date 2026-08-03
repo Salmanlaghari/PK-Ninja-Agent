@@ -39,6 +39,7 @@ from .local_provider import LocalAdapter
 from .openai_provider import OpenAIAdapter
 from .gemini_provider import GeminiAdapter
 from .xiaomi_provider import XiaomiAdapter
+from .anthropic_provider import AnthropicAdapter
 from .jules_provider import JulesAdapter
 from .mock_provider import MockProvider, MockAdapter
 
@@ -56,6 +57,7 @@ __all__ = [
     "OpenAIAdapter",
     "GeminiAdapter",
     "XiaomiAdapter",
+    "AnthropicAdapter",
     "JulesAdapter",
     "MockProvider",
     "MockAdapter",
