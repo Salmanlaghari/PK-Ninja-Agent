@@ -212,14 +212,22 @@ class Workspace:
         env = dict(os.environ)
         # Make sure git never prompts interactively.
         env["GIT_TERMINAL_PROMPT"] = "0"
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except FileNotFoundError:
+            return CommandResult(
+                command="git " + " ".join(args),
+                returncode=127,
+                stdout="",
+                stderr="git is not installed or not on PATH.",
+            )
         return CommandResult(
             command="git " + " ".join(args),
             returncode=proc.returncode,

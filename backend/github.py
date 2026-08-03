@@ -62,10 +62,19 @@ def _masked_clone_url(owner: str, repo: str) -> str:
 def _run(args, cwd, timeout=60) -> CommandResult:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
-    proc = subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True,
-        timeout=timeout, env=env,
-    )
+    try:
+        proc = subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+    except FileNotFoundError:
+        return CommandResult(
+            command=" ".join(args),
+            returncode=127,
+            stdout="",
+            stderr=f"Command not found: {args[0]}. "
+                   f"Ensure '{args[0]}' is installed and on PATH.",
+        )
     return CommandResult(
         command=" ".join(args),
         returncode=proc.returncode,

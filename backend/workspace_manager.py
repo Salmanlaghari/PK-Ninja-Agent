@@ -174,13 +174,15 @@ async def create_workspace(settings: Any, name: str,
     p.mkdir(parents=True, exist_ok=False)
     if repo and repo.strip():
         import subprocess
-        r = subprocess.run(
-            ["git", "clone", "--depth", "1", f"https://github.com/{repo.strip()}.git", "."],
-            cwd=str(p), capture_output=True, text=True, timeout=120,
-        )
-        if r.returncode != 0:
-            # Best-effort: keep the dir but report the clone failure via detail.
-            log.warning("git clone failed for %s: %s", repo, r.stderr[:200])
+        try:
+            r = subprocess.run(
+                ["git", "clone", "--depth", "1", f"https://github.com/{repo.strip()}.git", "."],
+                cwd=str(p), capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                log.warning("git clone failed for %s: %s", repo, r.stderr[:200])
+        except FileNotFoundError:
+            log.warning("git not installed; workspace created without clone.")
     await _touch_recent(settings, name)
     return _describe(settings, name)
 
