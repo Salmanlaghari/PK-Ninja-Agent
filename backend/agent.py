@@ -39,6 +39,41 @@ from ai_provider import (
     Plan,
     get_provider,
 )
+
+import asyncio
+
+
+def _run_async(coro):
+    """Run an async coroutine from sync code, even inside a running event loop.
+
+    On Vercel (serverless), FastAPI already has a running event loop so
+    ``asyncio.run()`` fails.  This helper spins up a *new* loop in a
+    background thread and returns the result.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Already inside a running loop — use a thread
+        result = [None]
+        exc = [None]
+
+        def _target():
+            try:
+                result[0] = asyncio.run(coro)
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        t.join()
+        if exc[0]:
+            raise exc[0]
+        return result[0]
+    else:
+        return asyncio.run(coro)
 from config import Settings, get_settings
 from github import GitHubError, clone_or_pull
 from models import EventType, TaskStatus
@@ -325,7 +360,7 @@ class Agent:
                 future = asyncio.run_coroutine_threadsafe(db_get_task_memory(self.task_id), loop)
                 mem = future.result(timeout=5)
             except RuntimeError:
-                mem = asyncio.run(db_get_task_memory(self.task_id))
+                mem = _run_async(db_get_task_memory(self.task_id))
 
             if mem:
                 import json
@@ -353,7 +388,7 @@ class Agent:
                 loop.create_task(db_save_task_memory(self.task_id, task_context_str, repo_context_str,
                                                      analysis_summary, plan_steps_str))
             except RuntimeError:
-                asyncio.run(db_save_task_memory(self.task_id, task_context_str, repo_context_str,
+                _run_async(db_save_task_memory(self.task_id, task_context_str, repo_context_str,
                                                 analysis_summary, plan_steps_str))
         except Exception as e:
             log.warning(f"Failed to save task memory for {self.task_id}: {e}")
@@ -723,9 +758,9 @@ class Agent:
                         future = pool.submit(asyncio.run, _run_idx())
                         stats = future.result(timeout=60)
                 else:
-                    stats = loop.run_until_complete(_run_idx())
+                    stats = _run_async(_run_idx())
             except RuntimeError:
-                stats = asyncio.run(_run_idx())
+                stats = _run_async(_run_idx())
 
             self.emit(EventType.info, f"Repository indexed: {stats['total']} files, "
                       f"{stats['added']} added, {stats['updated']} updated, {stats['deleted']} deleted.")
@@ -746,17 +781,13 @@ class Agent:
         # Hybrid file context detection (candidates filtered using index keywords, then AI select)
         from context_engine import find_candidate_files, ai_select_relevant_files
         try:
-            import asyncio
-            candidates = asyncio.run(find_candidate_files(self.task_id, self.description, str(self.settings.db_path), ws))
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            candidates = loop.run_until_complete(find_candidate_files(self.task_id, self.description, str(self.settings.db_path), ws))
-            loop.close()
+            candidates = _run_async(find_candidate_files(self.task_id, self.description, str(self.settings.db_path), ws))
+        except Exception:
+            candidates = []
 
         try:
-            import asyncio
             if self._is_streaming_provider:
-                relevant_files = asyncio.run(ai_select_relevant_files(self.description, candidates, self.provider))
+                relevant_files = _run_async(ai_select_relevant_files(self.description, candidates, self.provider))
             else:
                 relevant_files = candidates[:8] # local fallback context
         except Exception:
@@ -786,10 +817,10 @@ class Agent:
                 async with await _db_connect(self.settings.db_path) as conn:
                     return await get_project_map(self.task_id, ws, conn)
             try:
-                project_map_str = asyncio.run(_get_map())
+                project_map_str = _run_async(_get_map())
             except RuntimeError:
                 loop = asyncio.new_event_loop()
-                project_map_str = loop.run_until_complete(_get_map())
+                project_map_str = _run_async(_get_map())
                 loop.close()
         except Exception:
             pass
@@ -1091,10 +1122,10 @@ class Agent:
                     async with await _db_connect(ws.settings.db_path) as conn:
                         return await search_symbols(self.task_id, args.get("query", ""), conn)
                 try:
-                    return asyncio.run(_run_search())
+                    return _run_async(_run_search())
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
-                    res = loop.run_until_complete(_run_search())
+                    res = _run_async(_run_search())
                     loop.close()
                     return res
             except Exception as e:
@@ -1142,10 +1173,10 @@ class Agent:
                     async with await _db_connect(self.settings.db_path) as conn:
                         return await index_workspace(self.task_id, ws, conn)
                 try:
-                    return asyncio.run(_run_idx())
+                    return _run_async(_run_idx())
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
-                    res = loop.run_until_complete(_run_idx())
+                    res = _run_async(_run_idx())
                     loop.close()
                     return res
             except Exception as e:
