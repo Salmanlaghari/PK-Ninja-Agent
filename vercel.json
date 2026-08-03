@@ -5,8 +5,8 @@
   "outputDirectory": ".",
   "functions": {
     "api/index.py": {
-      "maxDuration": 60,
-      "memory": 1024,
+      "maxDuration": 300,
+      "memory": 3009,
       "includeFiles": "backend/**,frontend/**,requirements.txt"
     }
   },
