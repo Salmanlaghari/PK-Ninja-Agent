@@ -1,2 +1,16 @@
+[project]
+name = "pk-ninja-agent"
+version = "0.2.1"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sse-starlette>=2.1",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+]
+
 [tool.vercel]
 entrypoint = "backend.main:app"
