@@ -1,13 +1,11 @@
-/* PK Ninja Agent v2 — frontend logic. Vanilla JS, no frameworks.
-   Consumes live agent events via WebSocket (preferred) with SSE fallback,
-   renders real streaming AI "thinking" tokens, supports task cancellation,
-   shows provider status, and lets the user run sandboxed terminal commands.
-   Every event rendered is a REAL event from the backend — nothing is faked. */
+/* PK Ninja Agent v3 — Vanilla JS IDE Coding Workspace Controller.
+   Manages Task Queue switching, Interactive File Tree, AST Symbol preview,
+   Git Staging, Branch Checkouts, WebSocket SSE event streams, Live terminal,
+   and fluid mobile-responsive Tab switching. */
 
 const $ = (id) => document.getElementById(id);
 const activity = $("activity");
 const terminal = $("terminal");
-const filesEl = $("files");
 const diffEl = $("diff");
 const statusEl = $("status");
 const statusText = $("status-text");
@@ -24,12 +22,12 @@ let evtSource = null;     // SSE fallback connection
 let useWS = false;        // whether we are on WebSocket transport
 let wsReconnectT = null;  // reconnect timer
 let wsDead = false;       // user-intentional close flag
-// The current "thinking" streaming line; reused across token events until a
-// non-thinking event arrives, which closes it.
+
+// The current "thinking" streaming line; reused across token events
 let thinkingLine = null;
 let thinkingLabel = null;
 
-// Emoji glyph per event type — matches the example in the spec.
+// Event type emojis
 const GLYPH = {
   session_started: "✓",
   analyzing: "🧠",
@@ -50,14 +48,13 @@ const GLYPH = {
   cancelled: "✖",
 };
 
-// Map a canonical status to a CSS status-pill class + human label.
+// Canonical status classes & labels
 const STATUS_MAP = {
   idle: ["idle", "Idle"],
   running: ["running", "Running"],
   success: ["success", "Completed"],
   failed: ["failed", "Failed"],
   cancelled: ["cancelled", "Cancelled"],
-  // legacy aliases (backend may still emit these)
   pending: ["idle", "Idle"],
   completed: ["success", "Completed"],
 };
@@ -74,8 +71,6 @@ function setStatus(state, text) {
 function setRunningUI(on) {
   startBtn.disabled = on;
   cancelBtn.hidden = !on;
-  // Manual terminal is only enabled once a task is running (so we know the
-  // workspace + task id). It stays enabled after completion too.
   if (on) { termInput.disabled = false; termRun.disabled = false; }
 }
 
@@ -96,11 +91,9 @@ function escapeHtml(s) {
 function clearPlaceholders() {
   if (activity.querySelector(".empty-state")) activity.innerHTML = "";
   if (terminal.querySelector(".empty")) terminal.innerHTML = "";
-  if (filesEl.querySelector(".empty-state")) filesEl.innerHTML = "";
   if (diffEl.querySelector(".empty-state")) diffEl.innerHTML = "";
 }
 
-// Close any open streaming "thinking" line so the next event starts fresh.
 function closeThinkingLine() {
   if (thinkingLabel) {
     thinkingLabel.classList.remove("typing");
@@ -139,16 +132,47 @@ function appendThinkingToken(token) {
   activity.scrollTop = activity.scrollHeight;
 }
 
+function updateExecutionPlanUI(planSteps) {
+  if (!planSteps || !planSteps.length) return;
+  const box = $("execution-plan-box");
+  const stepsContainer = $("execution-steps");
+  if (!box || !stepsContainer) return;
+
+  box.hidden = false;
+  stepsContainer.innerHTML = planSteps.map((step) => {
+    let icon = "⏳";
+    let cls = "pending";
+    if (step.status === "running") { icon = "⚡"; cls = "running"; }
+    else if (step.status === "success") { icon = "✅"; cls = "success"; }
+    else if (step.status === "failed") { icon = "❌"; cls = "failed"; }
+    else if (step.status === "retrying") { icon = "🔄"; cls = "retrying"; }
+    else if (step.status === "cancelled") { icon = "✖"; cls = "cancelled"; }
+
+    const retryLabel = step.retries > 0 ? `<span class="step-retry-badge">Retry ${step.retries}</span>` : "";
+
+    return `
+      <div class="execution-step-item ${cls}">
+        <span class="step-icon">${icon}</span>
+        <span class="step-desc">Step ${step.id}: ${escapeHtml(step.description)}</span>
+        ${retryLabel}
+      </div>
+    `;
+  }).join("");
+}
+
 function renderEvent(ev) {
-  // Streamed AI tokens are handled specially: they append to one live line.
   if (ev.type === "thinking") {
     const token = (ev.data && (ev.data.token || ev.data.text)) ||
                   (typeof ev.message === "string" ? ev.message : "");
     if (token) appendThinkingToken(token);
     return;
   }
-  // Any non-thinking event closes the streaming thinking line.
   closeThinkingLine();
+
+  // Dynamically update structured step plan if provided in event metadata
+  if (ev.data && ev.data.plan_steps) {
+    updateExecutionPlanUI(ev.data.plan_steps);
+  }
 
   clearPlaceholders();
   const div = document.createElement("div");
@@ -160,7 +184,7 @@ function renderEvent(ev) {
   activity.appendChild(div);
   activity.scrollTop = activity.scrollHeight;
 
-  // Terminal panel: show real command output.
+  // Render terminal commands/output
   if (ev.type === "command_started") {
     const line = document.createElement("div");
     line.className = "line cmd";
@@ -197,66 +221,405 @@ function renderEvent(ev) {
     terminal.scrollTop = terminal.scrollHeight;
   }
 
-  // Status transitions driven by REAL events only.
+  // Handle status updates
   if (ev.type === "session_started") setStatus("running", "Running");
-  if (ev.type === "completed") setStatus("success", "Completed");
-  if (ev.type === "error") setStatus("failed", "Error");
+  if (ev.type === "completed") {
+    setStatus("success", "Completed");
+    setRunningUI(false);
+    refreshGitPanel();
+    refreshExplorerTree();
+    loadTasks();
+  }
+  if (ev.type === "error") {
+    setStatus("failed", "Error");
+    setRunningUI(false);
+    loadTasks();
+  }
   if (ev.type === "fixing") setStatus("running", "Fixing");
   if (ev.type === "cancelled") {
     setStatus("cancelled", "Cancelled");
     setRunningUI(false);
     closeTransport();
+    loadTasks();
   }
 
-  // Refresh changed files + diff after editing/completed.
-  if (ev.type === "editing" || ev.type === "completed" || ev.type === "info") {
-    if (ev.data && (ev.data.changed || ev.data.diff !== undefined || ev.data.branch)) {
-      refreshDiff();
-    }
-    if (ev.type === "completed") {
-      setRunningUI(false);
-      closeTransport();
-      refreshDiff();
-    }
+  if (ev.type === "editing" || ev.type === "info") {
+    refreshGitPanel();
+    refreshExplorerTree();
   }
 }
 
-function renderDiff(diff) {
-  if (!diff) return;
-  clearPlaceholders();
-  if (diff.files && diff.files.length) {
-    filesEl.innerHTML = diff.files.map((f) => {
-      const st = f.length >= 3 ? f[0] : "M";
-      const path = f.length >= 3 ? f.slice(3) : f;
-      const cls = { M: "M", A: "A", D: "D", "?": "U", U: "U" }[st] || "M";
-      return `<li><span class="stat ${cls}">${st === "?" ? "?" : st}</span><span class="path">${escapeHtml(path)}</span></li>`;
+// ── Task switching and loading ──────────────────────────────────────────
+async function loadTasks() {
+  try {
+    const r = await fetch("/api/tasks");
+    if (!r.ok) return;
+    const tasks = await r.json();
+    const taskList = $("task-list");
+    $("task-count").textContent = tasks.length;
+
+    if (tasks.length === 0) {
+      taskList.innerHTML = '<li class="empty-state">No tasks available.</li>';
+      return;
+    }
+
+    taskList.innerHTML = tasks.map((t) => {
+      const activeClass = t.task_id === currentTaskId ? "active" : "";
+      const statusClass = t.status === "running" ? "pulse" : "";
+      return `
+        <li class="task-item ${activeClass}" onclick="selectTask('${t.task_id}')">
+          <span class="task-desc">${escapeHtml(t.description)}</span>
+          <span class="status-pill ${t.status} ${statusClass}">${t.status}</span>
+        </li>
+      `;
     }).join("");
-  } else {
-    filesEl.innerHTML = '<li class="empty-state">No changes yet.</li>';
-  }
-  const text = diff.staged || diff.unstaged || "";
-  if (text.trim()) {
-    diffEl.innerHTML = text.split("\n").map((ln) => {
-      let cls = "ctx";
-      if (ln.startsWith("+")) cls = "add";
-      else if (ln.startsWith("-")) cls = "del";
-      else if (ln.startsWith("@@")) cls = "hunk";
-      return `<span class="${cls}">${escapeHtml(ln)}</span>`;
-    }).join("\n");
-  } else {
-    diffEl.innerHTML = '<span class="empty-state">No diff yet.</span>';
+  } catch (e) {
+    console.error("loadTasks failed", e);
   }
 }
 
-async function refreshDiff() {
+async function selectTask(taskId) {
+  if (currentTaskId === taskId) return;
+  currentTaskId = taskId;
+  toast(`Switched to Task: ${taskId.slice(0, 8)}`, "ok");
+
+  closeTransport();
+  activity.innerHTML = "";
+  terminal.innerHTML = "";
+  thinkingLine = null;
+
+  // Highlight active task in sidebar
+  document.querySelectorAll(".task-item").forEach(item => item.classList.remove("active"));
+  loadTasks();
+
+  // Load task detail
+  try {
+    const r = await fetch(`/api/tasks/${taskId}`);
+    if (r.ok) {
+      const task = await r.json();
+      setStatus(task.status);
+      setRunningUI(task.status === "running");
+
+      // Populate events history
+      if (task.events && task.events.length) {
+        task.events.forEach(renderEvent);
+      } else {
+        activity.innerHTML = '<div class="empty-state">No activity events for this task.</div>';
+      }
+    }
+  } catch (e) {
+    console.error("selectTask failed", e);
+  }
+
+  // Refresh Git branch and Explorer Tree
+  refreshGitPanel();
+  refreshExplorerTree();
+
+  // Connect to live WebSocket / SSE if running
+  wsDead = false;
+  if ("WebSocket" in window && window.WebSocket) {
+    startWebSocket(currentTaskId);
+  } else {
+    startSSE(currentTaskId);
+  }
+}
+
+// ── Repository Explorer Tree ─────────────────────────────────────────────
+async function refreshExplorerTree() {
   if (!currentTaskId) return;
+  const treeContainer = $("repo-tree");
+  treeContainer.innerHTML = '<div class="empty-state">Loading workspace tree...</div>';
+
+  try {
+    const r = await fetch(`/api/tasks/${currentTaskId}/tree`);
+    if (!r.ok) throw new Error("API error");
+    const tree = await r.json();
+
+    if (tree.length === 0) {
+      treeContainer.innerHTML = '<div class="empty-state">No files in repository workspace.</div>';
+      return;
+    }
+
+    treeContainer.innerHTML = "";
+    renderTreeNode(tree, treeContainer);
+  } catch (e) {
+    treeContainer.innerHTML = '<div class="empty-state">Failed to load repository tree.</div>';
+  }
+}
+
+function renderTreeNode(nodes, container) {
+  nodes.forEach((node) => {
+    const nodeEl = document.createElement("div");
+    nodeEl.className = "tree-node";
+
+    const rowEl = document.createElement("div");
+    rowEl.className = "tree-row";
+
+    const icon = node.type === "dir" ? "📁" : "📄";
+    const symbolCount = (node.symbols && node.symbols.length) || 0;
+    const hasSymbolsBtn = node.type === "file" && symbolCount > 0
+      ? `<span class="symbols-toggle-btn" onclick="toggleSymbols(event, '${node.path}')">${symbolCount} syms</span>`
+      : "";
+
+    rowEl.innerHTML = `
+      <span class="node-icon">${icon}</span>
+      <span class="node-name" onclick="openFilePreview('${node.path || ""}', ${node.type === "dir"})">${escapeHtml(node.name)}</span>
+      ${hasSymbolsBtn}
+    `;
+
+    nodeEl.appendChild(rowEl);
+
+    if (node.type === "dir" && node.children) {
+      const childrenContainer = document.createElement("div");
+      childrenContainer.className = "tree-children";
+      childrenContainer.style.display = "block"; // Open by default
+
+      // Toggle folder visibility on click
+      rowEl.querySelector(".node-name").addEventListener("click", (e) => {
+        e.stopPropagation();
+        const iconEl = rowEl.querySelector(".node-icon");
+        if (childrenContainer.style.display === "none") {
+          childrenContainer.style.display = "block";
+          iconEl.textContent = "📁";
+        } else {
+          childrenContainer.style.display = "none";
+          iconEl.textContent = "📁"; // collapsed symbol
+        }
+      });
+
+      renderTreeNode(node.children, childrenContainer);
+      nodeEl.appendChild(childrenContainer);
+    }
+
+    if (node.type === "file" && symbolCount > 0) {
+      const symbolsDropdown = document.createElement("div");
+      symbolsDropdown.className = "tree-symbols-dropdown";
+      symbolsDropdown.id = `symbols-${node.path.replace(/\//g, "-")}`;
+      symbolsDropdown.style.display = "none"; // Closed by default
+
+      node.symbols.forEach((sym) => {
+        const symEl = document.createElement("div");
+        symEl.className = "tree-symbol-item";
+        symEl.innerHTML = `
+          <span class="sym-type-badge ${sym.type}">${sym.type}</span>
+          <span class="sym-name">${escapeHtml(sym.name)}</span>
+          <span style="color:var(--text-faint)">(L${sym.line})</span>
+        `;
+        symbolsDropdown.appendChild(symEl);
+      });
+      nodeEl.appendChild(symbolsDropdown);
+    }
+
+    container.appendChild(nodeEl);
+  });
+}
+
+function toggleSymbols(event, filePath) {
+  event.stopPropagation();
+  const dropdown = $(`symbols-${filePath.replace(/\//g, "-")}`);
+  if (dropdown) {
+    dropdown.style.display = dropdown.style.display === "none" ? "block" : "none";
+  }
+}
+
+async function openFilePreview(filePath, isDir) {
+  if (isDir || !filePath) return;
+
+  const modal = $("file-modal");
+  const modalTitle = $("modal-title");
+  const modalContent = $("modal-content");
+
+  modalTitle.textContent = filePath;
+  modalContent.textContent = "Loading file content...";
+  modal.hidden = false;
+
+  try {
+    const r = await fetch(`/api/tasks/${currentTaskId}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: `cat ${filePath}` }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      modalContent.textContent = data.stdout || data.stderr || "(empty file)";
+    } else {
+      modalContent.textContent = "Could not preview file content.";
+    }
+  } catch (e) {
+    modalContent.textContent = "Failed to load file.";
+  }
+}
+
+$("modal-close").addEventListener("click", () => {
+  $("file-modal").hidden = true;
+});
+
+// ── Git Panel Operations ──────────────────────────────────────────────────
+async function refreshGitPanel() {
+  if (!currentTaskId) return;
+
+  // 1) Load branch dropdown list
+  try {
+    const r = await fetch(`/api/git/branches?task_id=${currentTaskId}`);
+    if (r.ok) {
+      const data = await r.json();
+      const branchesSelect = $("git-branches");
+      branchesSelect.innerHTML = data.branches.map((b) => {
+        const selected = b === data.current ? "selected" : "";
+        return `<option value="${escapeHtml(b)}" ${selected}>${escapeHtml(b)}</option>`;
+      }).join("");
+    }
+  } catch (e) {}
+
+  // 2) Load changed files list
   try {
     const r = await fetch(`/api/diff?task_id=${currentTaskId}`);
-    if (r.ok) renderDiff(await r.json());
-  } catch (e) { /* ignore */ }
+    if (r.ok) {
+      const diff = await r.json();
+
+      // Render files lists with Stage/Unstage/Discard buttons
+      const gitFilesEl = $("git-files");
+      if (diff.files && diff.files.length) {
+        gitFilesEl.innerHTML = diff.files.map((f) => {
+          const st = f.length >= 3 ? f[0] : "M";
+          const path = f.length >= 3 ? f.slice(3) : f;
+
+          // Determine if file is currently staged or unstaged to offer proper actions
+          const isStaged = diff.staged && diff.staged.includes(path);
+          const stageBtn = !isStaged
+            ? `<button class="btn-action-git" onclick="gitStage('${path}')">Stage</button>`
+            : `<button class="btn-action-git" onclick="gitUnstage('${path}')">Unstage</button>`;
+          const discardBtn = `<button class="btn-action-git" onclick="gitDiscard('${path}')">Discard</button>`;
+
+          return `
+            <li class="git-file-item">
+              <div class="file-info">
+                <span class="file-status-letter ${st}">${st}</span>
+                <span class="file-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+              </div>
+              <div class="action-buttons">
+                ${stageBtn}
+                ${discardBtn}
+              </div>
+            </li>
+          `;
+        }).join("");
+      } else {
+        gitFilesEl.innerHTML = '<li class="empty-state">No changes yet.</li>';
+      }
+
+      // Render actual diff viewer highlight
+      const text = diff.staged || diff.unstaged || "";
+      if (text.trim()) {
+        diffEl.innerHTML = text.split("\n").map((ln) => {
+          let cls = "ctx";
+          if (ln.startsWith("+")) cls = "add";
+          else if (ln.startsWith("-")) cls = "del";
+          else if (ln.startsWith("@@")) cls = "hunk";
+          return `<span class="${cls}">${escapeHtml(ln)}</span>`;
+        }).join("\n");
+      } else {
+        diffEl.innerHTML = '<span class="empty-state">No diff yet.</span>';
+      }
+    }
+  } catch (e) {}
 }
 
-// ── WebSocket transport (preferred) ─────────────────────────────────────
+async function gitStage(filePath) {
+  if (!currentTaskId) return;
+  try {
+    const r = await fetch("/api/git/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: currentTaskId, path: filePath }),
+    });
+    if (r.ok) {
+      toast(`Staged ${filePath}`, "ok");
+      refreshGitPanel();
+    }
+  } catch (e) {}
+}
+
+async function gitUnstage(filePath) {
+  if (!currentTaskId) return;
+  try {
+    const r = await fetch("/api/git/unstage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: currentTaskId, path: filePath }),
+    });
+    if (r.ok) {
+      toast(`Unstaged ${filePath}`, "ok");
+      refreshGitPanel();
+    }
+  } catch (e) {}
+}
+
+async function gitDiscard(filePath) {
+  if (!currentTaskId) return;
+  if (!confirm(`Are you sure you want to discard all changes in ${filePath}?`)) return;
+  try {
+    const r = await fetch("/api/git/discard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: currentTaskId, path: filePath }),
+    });
+    if (r.ok) {
+      toast(`Discarded changes in ${filePath}`, "ok");
+      refreshGitPanel();
+      refreshExplorerTree();
+    }
+  } catch (e) {}
+}
+
+// Branch Selection Change
+$("git-branches").addEventListener("change", async (e) => {
+  const branch = e.target.value;
+  if (!branch || !currentTaskId) return;
+
+  toast(`Switching to branch: ${branch}`, "ok");
+  try {
+    const r = await fetch("/api/git/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: currentTaskId, branch, create: false }),
+    });
+    if (r.ok) {
+      toast(`Switched branch to ${branch}`, "ok");
+      refreshGitPanel();
+    } else {
+      toast("Branch checkout failed", "err");
+    }
+  } catch (err) {
+    toast("Checkout failed", "err");
+  }
+});
+
+// New Branch creation Button
+$("btn-new-branch").addEventListener("click", async () => {
+  if (!currentTaskId) return;
+  const branch = prompt("Enter a name for the new branch:");
+  if (!branch) return;
+
+  toast(`Creating branch: ${branch}`, "ok");
+  try {
+    const r = await fetch("/api/git/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: currentTaskId, branch, create: true }),
+    });
+    if (r.ok) {
+      toast(`Branch ${branch} created & checkout`, "ok");
+      refreshGitPanel();
+    } else {
+      toast("Branch creation failed", "err");
+    }
+  } catch (err) {
+    toast("Checkout failed", "err");
+  }
+});
+
+// ── Live WebSocket Reconnection and SSE ──────────────────────────────────
 function wsUrl(taskId) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/api/tasks/${taskId}/ws`;
@@ -269,28 +632,23 @@ function startWebSocket(taskId) {
   try { ws = new WebSocket(wsUrl(taskId)); }
   catch (e) { useWS = false; startSSE(taskId); return; }
 
-  ws.onopen = () => { /* connected — events flow on message */ };
-
+  ws.onopen = () => {};
   ws.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
       renderEvent(ev);
-    } catch (err) { /* ignore malformed/keepalive frames */ }
+    } catch (err) {}
   };
-
   ws.onclose = () => {
-    if (wsDead) return;            // intentional close — do not reconnect
-    if (!currentTaskId) return;    // nothing to reconnect to
-    // Reconnect once after a short delay if the agent may still be running.
+    if (wsDead) return;
+    if (!currentTaskId) return;
     wsReconnectT = setTimeout(() => {
       if (currentTaskId && !wsDead) startWebSocket(currentTaskId);
     }, 1200);
   };
-
-  ws.onerror = () => { /* onclose will follow */ };
+  ws.onerror = () => {};
 }
 
-// ── SSE fallback transport ──────────────────────────────────────────────
 function startSSE(taskId) {
   useWS = false;
   if (evtSource) evtSource.close();
@@ -299,25 +657,19 @@ function startSSE(taskId) {
     try {
       const ev = JSON.parse(e.data);
       renderEvent(ev);
-    } catch (err) { /* ignore keepalives */ }
-  };
-  evtSource.onerror = () => {
-    // SSE closes after completion; that's expected. No auto-reconnect here.
+    } catch (err) {}
   };
 }
 
-// ── Cancel a running task ───────────────────────────────────────────────
 async function cancelCurrentTask() {
   if (!currentTaskId) return;
-  wsDead = true; // prevent WS auto-reconnect during teardown
-  // Preferred: tell the backend over the live WebSocket.
+  wsDead = true;
   if (useWS && ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify({ type: "cancel" })); } catch (e) { /* fall through */ }
+    try { ws.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
-  // Always also hit the REST cancel endpoint for reliability.
   try {
     await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: "POST" });
-  } catch (e) { /* ignore — WS path may have handled it */ }
+  } catch (e) {}
   setStatus("cancelled", "Cancelling…");
 }
 
@@ -327,7 +679,6 @@ cancelBtn.addEventListener("click", () => {
   toast("Cancelling…", "");
 });
 
-// ── Close all live transports ───────────────────────────────────────────
 function closeTransport() {
   wsDead = true;
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
@@ -335,7 +686,7 @@ function closeTransport() {
   if (evtSource) { try { evtSource.close(); } catch (e) {} evtSource = null; }
 }
 
-// ── Provider config (non-secret summary) ───────────────────────────────
+// ── Provider config ──────────────────────────────────────────────────────
 async function loadProvider() {
   try {
     const r = await fetch("/api/config");
@@ -350,26 +701,24 @@ async function loadProvider() {
       providerBadge.classList.remove("live");
       providerBadge.title = `${cfg.provider} · ${cfg.model || "?"}`;
     }
-  } catch (e) { /* backend unreachable — keep badge hidden */ }
+  } catch (e) {}
 }
 
-// ── Repository ──────────────────────────────────────────────────────────
+// ── Repository info ──────────────────────────────────────────────────────
 async function loadRepo() {
   try {
     const r = await fetch("/api/repository");
     const data = await r.json();
-    const name = $("repo-name"), branch = $("repo-branch"), badge = $("repo-badge");
+    const name = $("repo-name"), badge = $("repo-badge");
     if (data.configured) {
       name.textContent = data.full_name;
       name.className = "repo-name";
-      branch.textContent = "default: " + data.default_branch;
       badge.hidden = false;
       badge.textContent = data.private ? "private" : "public";
       badge.className = "badge" + (data.private ? " private" : "");
     } else {
       name.textContent = "No repository configured";
       name.className = "repo-err";
-      branch.textContent = "Set GITHUB_OWNER / GITHUB_REPO in .env";
       badge.hidden = true;
     }
   } catch (e) {
@@ -385,10 +734,10 @@ startBtn.addEventListener("click", async () => {
   closeTransport();
   activity.innerHTML = "";
   terminal.innerHTML = "";
-  filesEl.innerHTML = '<li class="empty-state">No changes yet.</li>';
-  diffEl.innerHTML = '<span class="empty-state">No diff yet.</span>';
   thinkingLine = null;
   setStatus("running", "Starting");
+  const planBox = $("execution-plan-box");
+  if (planBox) planBox.hidden = true;
   try {
     const r = await fetch("/api/tasks", {
       method: "POST",
@@ -399,13 +748,22 @@ startBtn.addEventListener("click", async () => {
     const data = await r.json();
     currentTaskId = data.task_id;
     wsDead = false;
-    // Prefer WebSocket; fall back to SSE if WS is unavailable.
     if ("WebSocket" in window && window.WebSocket) {
       startWebSocket(currentTaskId);
     } else {
       startSSE(currentTaskId);
     }
     toast("Agent started", "ok");
+
+    // Switch to activity tab on mobile automatically
+    switchMobileTab("tab-activity");
+
+    // Reload task queue list
+    setTimeout(() => {
+      loadTasks();
+      refreshGitPanel();
+      refreshExplorerTree();
+    }, 1000);
   } catch (e) {
     setStatus("failed", "Error");
     setRunningUI(false);
@@ -458,6 +816,8 @@ async function runTerminalCommand() {
     termInput.value = "";
     termRun.disabled = false;
     termInput.focus();
+    refreshGitPanel();
+    refreshExplorerTree();
   }
 }
 
@@ -466,9 +826,9 @@ termInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); runTerminalCommand(); }
 });
 
-// ── Git controls ────────────────────────────────────────────────────────
+// ── Git Controls buttons ──────────────────────────────────────────────────
 async function gitAction(url, body, okMsg) {
-  if (!currentTaskId) { toast("Start a task first.", "err"); return null; }
+  if (!currentTaskId) { toast("Start or select a task first.", "err"); return null; }
   try {
     const r = await fetch(url, {
       method: "POST",
@@ -478,7 +838,8 @@ async function gitAction(url, body, okMsg) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
     toast(okMsg, "ok");
-    refreshDiff();
+    refreshGitPanel();
+    refreshExplorerTree();
     return data;
   } catch (e) {
     toast(e.message, "err");
@@ -486,32 +847,30 @@ async function gitAction(url, body, okMsg) {
   }
 }
 
-$("btn-branch").addEventListener("click", () => {
-  const branch = $("branch-name").value.trim();
-  if (!branch) { toast("Enter a branch name.", "err"); return; }
-  gitAction("/api/git/branch", { task_id: currentTaskId, branch }, "Branch created");
-});
-
 $("btn-commit").addEventListener("click", () => {
-  const msg = prompt("Commit message:", "PK Ninja Agent changes");
-  if (!msg) return;
-  gitAction("/api/git/commit", { task_id: currentTaskId, message: msg }, "Committed");
+  const msg = $("commit-message").value.trim();
+  if (!msg) { toast("Enter a commit message first.", "err"); return; }
+  gitAction("/api/git/commit", { task_id: currentTaskId, message: msg }, "Committed successfully").then((res) => {
+    if (res && res.success) {
+      $("commit-message").value = "";
+    }
+  });
 });
 
 $("btn-push").addEventListener("click", () => {
-  gitAction("/api/git/push", { task_id: currentTaskId }, "Pushed");
+  gitAction("/api/git/push", { task_id: currentTaskId }, "Pushed branch to remote");
 });
 
 $("btn-pr-prep").addEventListener("click", async () => {
   if (!currentTaskId) { toast("Start a task first.", "err"); return; }
-  const data = await gitAction("/api/pr/prepare", { task_id: currentTaskId }, "PR prepared");
+  const data = await gitAction("/api/pr/prepare", { task_id: currentTaskId }, "PR details prepared");
   if (data) {
-    $("pr-out").innerHTML = `<div class="empty-state">
-      <b>Base:</b> ${escapeHtml(data.base)} → <b>Head:</b> ${escapeHtml(data.head || "—")}<br>
+    $("pr-out").innerHTML = `<div class="empty-state" style="text-align:left;background:var(--bg-elev);border-radius:var(--radius-sm);padding:8px;">
+      <b>Base:</b> ${escapeHtml(data.base)} &larr; <b>Head:</b> ${escapeHtml(data.head || "—")}<br>
       <b>Title:</b> ${escapeHtml(data.title)}<br>
-      <b>Ready:</b> ${data.ready ? "yes" : "no (need branch + changes)"}<br>
-      <details><summary style="cursor:pointer;color:var(--text-faint)">command</summary>
-      <pre style="white-space:pre-wrap;word-break:break-word;margin-top:6px">${escapeHtml(data.command)}</pre></details>
+      <b>Ready:</b> ${data.ready ? "Yes" : "No (need branch + changes)"}<br>
+      <details><summary style="cursor:pointer;color:var(--text-faint);font-size:10px;">gh command</summary>
+      <pre style="white-space:pre-wrap;word-break:break-word;font-size:10px;margin-top:4px;color:var(--text-dim);font-family:var(--mono);">${escapeHtml(data.command)}</pre></details>
     </div>`;
   }
 });
@@ -519,13 +878,160 @@ $("btn-pr-prep").addEventListener("click", async () => {
 $("btn-pr-create").addEventListener("click", async () => {
   if (!currentTaskId) { toast("Start a task first.", "err"); return; }
   if (!confirm("Create a real Pull Request on GitHub?")) return;
-  const data = await gitAction("/api/pr/create", { task_id: currentTaskId }, "PR created!");
+  const data = await gitAction("/api/pr/create", { task_id: currentTaskId }, "PR successfully created!");
   if (data && data.pr_url) {
-    $("pr-out").innerHTML = `<div class="empty-state">✓ PR opened: <a href="${escapeHtml(data.pr_url)}" target="_blank" style="color:var(--info)">${escapeHtml(data.pr_url)}</a></div>`;
+    $("pr-out").innerHTML = `<div class="empty-state">✓ PR Opened: <a href="${escapeHtml(data.pr_url)}" target="_blank" style="color:var(--info);font-weight:600;">${escapeHtml(data.pr_url)}</a></div>`;
   }
 });
 
+$("btn-refresh-tree").addEventListener("click", (e) => {
+  e.stopPropagation();
+  refreshExplorerTree();
+  toast("Repository tree refreshed", "ok");
+});
+
+// ── Mobile Tabs Switching ────────────────────────────────────────────────
+function switchMobileTab(targetTabId) {
+  // Toggle tab buttons
+  document.querySelectorAll(".mobile-tabs .tab-btn").forEach((btn) => {
+    if (btn.getAttribute("data-tab") === targetTabId) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+
+  // Determine panels to hide/show
+  // Map of tab IDs to HTML element IDs
+  const tabMapping = {
+    "tab-task": $("tab-task"),
+    "tab-activity": $("tab-activity"),
+    "tab-explorer": $("panel-explorer"),
+    "tab-git": $("panel-git"),
+    "tab-diff": $("tab-diff"),
+    "tab-terminal": $("tab-terminal") // terminal lives in right column, matches mobile button target
+  };
+
+  // We also have to handle tab content visibility inside right column
+  document.querySelectorAll(".workspace-main .panel").forEach((pane) => {
+    pane.classList.remove("active-tab");
+  });
+  document.querySelectorAll(".workspace-sidebar .panel").forEach((pane) => {
+    pane.style.display = "none";
+  });
+
+  // Show only targeted element
+  const activeEl = tabMapping[targetTabId];
+  if (activeEl) {
+    if (activeEl.parentNode.tagName === "ASIDE") {
+      activeEl.style.display = "block";
+    } else {
+      activeEl.classList.add("active-tab");
+    }
+  }
+}
+
+// Register mobile tab clicks
+document.querySelectorAll(".mobile-tabs .tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const tabId = btn.getAttribute("data-tab");
+    switchMobileTab(tabId);
+  });
+});
+
+// ── Setup default tab classes for mobile (running in mobile width initially)
+function initMobileTabState() {
+  if (window.innerWidth <= 960) {
+    switchMobileTab("tab-task");
+  } else {
+    // Desktop width: restore sidebar visibility
+    document.querySelectorAll(".workspace-sidebar .panel").forEach((pane) => {
+      pane.style.display = "block";
+    });
+  }
+}
+
+window.addEventListener("resize", initMobileTabState);
+
+// ── Global registrations for HTML onclick events ────────────────────────
+window.selectTask = selectTask;
+window.gitStage = gitStage;
+window.gitUnstage = gitUnstage;
+window.gitDiscard = gitDiscard;
+window.toggleSymbols = toggleSymbols;
+window.openFilePreview = openFilePreview;
+
+// ── Kilo AI Gateway Configuration & Sync ─────────────────────────────────
+$("kilo-settings-toggle").addEventListener("click", () => {
+  const body = $("kilo-settings-body");
+  const arrow = $("kilo-arrow");
+  if (body.style.display === "none") {
+    body.style.display = "block";
+    arrow.textContent = "▼";
+  } else {
+    body.style.display = "none";
+    arrow.textContent = "▶";
+  }
+});
+
+$("btn-save-kilo").addEventListener("click", async () => {
+  const key = $("kilo-api-key").value.trim();
+  const model = $("kilo-model").value.trim() || null;
+  if (!key) {
+    toast("Kilo API Key is required.", "err");
+    return;
+  }
+
+  toast("Activating Kilo AI...", "");
+  try {
+    const r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "kilo",
+        api_key: key,
+        model: model,
+      }),
+    });
+    if (r.ok) {
+      localStorage.setItem("kilo_api_key", key);
+      localStorage.setItem("kilo_model", model || "");
+      toast("Kilo AI activated successfully!", "ok");
+      loadProvider();
+    } else {
+      toast("Failed to configure Kilo on backend.", "err");
+    }
+  } catch (e) {
+    toast("Error activating Kilo AI.", "err");
+  }
+});
+
+async function initKiloConfig() {
+  const key = localStorage.getItem("kilo_api_key");
+  const model = localStorage.getItem("kilo_model");
+  if (key) {
+    $("kilo-api-key").value = key;
+    if (model) $("kilo-model").value = model;
+
+    try {
+      await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "kilo",
+          api_key: key,
+          model: model || null,
+        }),
+      });
+    } catch (e) {}
+  }
+}
+
 // ── Init ────────────────────────────────────────────────────────────────
-loadRepo();
-loadProvider();
-setStatus("idle", "Idle");
+initKiloConfig().then(() => {
+  loadRepo();
+  loadProvider();
+  loadTasks();
+  initMobileTabState();
+  setStatus("idle", "Idle");
+});

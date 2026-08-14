@@ -6,10 +6,10 @@ workspace.py, github.py, or the UI.
 
 Provider selection is fully driven by environment variables (see config.py):
 
-    AI_PROVIDER = local | openai        (default: local — safe offline fallback)
-    AI_API_KEY  = <key>                 (only for non-local providers)
+    AI_PROVIDER = local | openai | gemini | anthropic | jules
+    AI_API_KEY  = <key>                 (only required for non-local providers)
     AI_MODEL    = <model name>
-    AI_BASE_URL = <OpenAI-compatible /v1 URL>
+    AI_BASE_URL = <endpoint URL>
 
 Providers
 ---------
@@ -20,20 +20,17 @@ LocalProvider
     API key or network. This is the default fallback so the MVP always works.
 
 OpenAIProvider
-    Works with **any** OpenAI-compatible REST endpoint:
-        * OpenAI            (https://api.openai.com/v1)
-        * Gemini OpenAI-compat (https://generativelanguage.googleapis.com/v1beta/openai/v1)
-        * MiMo / DeepSeek / Together / OpenRouter / a local Ollama server
-    Supports real streaming via ``stream_chat()`` (Server-Sent Events from the
-    endpoint). Falls back to non-streaming ``generate()`` if streaming is off.
+    Works with any OpenAI-compatible REST endpoint.
+    Supports real streaming via ``stream_chat()`` (Server-Sent Events).
 
-GeminiProvider (legacy)
-    Kept for backward compatibility. When ``AI_PROVIDER=gemini`` is set, the
-    factory routes through OpenAIProvider pointed at Google's OpenAI-compat
-    endpoint, so all providers share one code path.
+GeminiProvider
+    Legacy Gemini adapter routing through Google's OpenAI-compatible endpoint.
 
-We do NOT invent a fake API. If a key is missing or a call fails, the factory
-falls back to LocalProvider and the agent reports honestly.
+AnthropicProvider
+    Custom adapter for Anthropic Claude, supporting native SSE Messages API.
+
+JulesProvider
+    Custom adapter for Google's elite coding agent Jules.
 """
 from __future__ import annotations
 
@@ -269,12 +266,9 @@ class LocalProvider:
 # ────────────────────────────────────────────────────────────────────────
 # OpenAIProvider — works with any OpenAI-compatible endpoint + streaming
 # ────────────────────────────────────────────────────────────────────────
-# Known OpenAI-compatible base URLs (used when AI_BASE_URL is empty but a
-# provider-specific name is given).
 _DEFAULT_BASES: Dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/v1",
-    "mimo": "https://api.mimoai.ai/v1",  # placeholder; set AI_BASE_URL explicitly
     "deepseek": "https://api.deepseek.com/v1",
     "together": "https://api.together.xyz/v1",
     "openrouter": "https://openrouter.ai/api/v1",
@@ -283,16 +277,7 @@ _DEFAULT_BASES: Dict[str, str] = {
 
 
 class OpenAIProvider:
-    """Adapter for any OpenAI-compatible Chat Completions REST endpoint.
-
-    Supports:
-      * Non-streaming completion via ``generate()``.
-      * Real token streaming via ``stream_chat()`` (parses SSE ``data:`` lines).
-      * The ``plan``, ``edit``, ``analyze_error`` high-level helpers.
-
-    Requires ``AI_API_KEY`` (or legacy ``GEMINI_API_KEY``). If the key or
-    endpoint is missing, the factory falls back to LocalProvider.
-    """
+    """Adapter for any OpenAI-compatible Chat Completions REST endpoint."""
 
     name = "openai"
 
@@ -303,7 +288,6 @@ class OpenAIProvider:
         if not self.api_key:
             raise AIError("AI_API_KEY (or GEMINI_API_KEY) is not set; "
                           "cannot use OpenAIProvider.")
-        # Resolve base URL: explicit AI_BASE_URL > hint lookup > OpenAI default.
         hint = (provider_hint or self.settings.ai_provider or "openai").lower()
         self.base_url = (
             self.settings.ai_base_url.rstrip("/")
@@ -312,7 +296,6 @@ class OpenAIProvider:
         self.model = self.settings.effective_model() or "gpt-4o-mini"
         self.timeout = self.settings.ai_timeout_seconds
 
-    # ── Low-level HTTP ─────────────────────────────────────────────────
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -322,7 +305,6 @@ class OpenAIProvider:
     def generate(self, messages: List[ChatMessage], *,
                  stream: bool = False, temperature: Optional[float] = None,
                  max_tokens: Optional[int] = None) -> str:
-        """Non-streaming completion. Returns the assistant text."""
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -348,12 +330,6 @@ class OpenAIProvider:
     def stream_chat(
         self, messages: List[ChatMessage], on_token: Optional[Callable[[str], None]] = None
     ) -> ChatResult:
-        """Streaming completion. Calls ``on_token`` for each delta token.
-
-        Uses Server-Sent Events (``stream=true``). Parses ``data:`` lines and
-        accumulates the assistant text. Falls back to non-streaming if the
-        endpoint returns a non-SSE response.
-        """
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -367,7 +343,6 @@ class OpenAIProvider:
             with httpx.Client(timeout=self.timeout) as client:
                 with client.stream("POST", url, json=payload,
                                    headers=self._headers()) as r:
-                    # If the endpoint didn't actually stream, parse as JSON.
                     ctype = r.headers.get("content-type", "")
                     if "text/event-stream" not in ctype:
                         r.read()
@@ -404,13 +379,11 @@ class OpenAIProvider:
             raise AIError(f"AI streaming request failed: {exc}") from exc
         text = "".join(full_text)
         if not text:
-            # Endpoint returned nothing useful; try non-streaming.
             text = self.generate(messages)
             if on_token:
                 on_token(text)
         return ChatResult(text=text, model=self.model, finish_reason=finish_reason)
 
-    # ── High-level helpers ─────────────────────────────────────────────
     def plan(self, task: str, context: str) -> Plan:
         messages = [
             ChatMessage("system",
@@ -455,17 +428,314 @@ class OpenAIProvider:
 # GeminiProvider — legacy alias routed through OpenAIProvider
 # ────────────────────────────────────────────────────────────────────────
 class GeminiProvider(OpenAIProvider):
-    """Legacy Gemini adapter.
-
-    Routes through Google's OpenAI-compatible endpoint so all providers share
-    one streaming code path. Requires ``GEMINI_API_KEY`` or ``AI_API_KEY``.
-    """
+    """Legacy Gemini adapter."""
 
     name = "gemini"
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         super().__init__(settings=settings, provider_hint="gemini")
         self.model = self.settings.effective_model() or "gemini-1.5-flash"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# AnthropicProvider — custom adapter for Anthropic Claude
+# ────────────────────────────────────────────────────────────────────────
+class AnthropicProvider:
+    """Adapter for Anthropic's Messages REST API with full SSE streaming."""
+
+    name = "anthropic"
+
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings or get_settings()
+        self.api_key = self.settings.effective_api_key()
+        if not self.api_key:
+            raise AIError("AI_API_KEY (or GEMINI_API_KEY) is not set; "
+                          "cannot use AnthropicProvider.")
+        self.base_url = (
+            self.settings.ai_base_url.rstrip("/")
+            or "https://api.anthropic.com"
+        )
+        self.model = self.settings.effective_model() or "claude-3-5-sonnet-20241022"
+        self.timeout = self.settings.ai_timeout_seconds
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+
+    def generate(self, messages: List[ChatMessage], *,
+                 temperature: Optional[float] = None,
+                 max_tokens: Optional[int] = 1024) -> str:
+        system_msg = ""
+        user_messages = []
+        for m in messages:
+            if m.role == "system":
+                system_msg += m.content + "\n"
+            else:
+                user_messages.append({"role": m.role, "content": m.content})
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": user_messages,
+            "max_tokens": max_tokens or 1024,
+            "temperature": temperature if temperature is not None
+            else self.settings.ai_temperature,
+        }
+        if system_msg:
+            payload["system"] = system_msg.strip()
+
+        url = f"{self.base_url}/v1/messages"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                r = client.post(url, json=payload, headers=self._headers())
+                r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise AIError(f"Anthropic request failed: {exc}") from exc
+        data = r.json()
+        try:
+            return data["content"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIError(f"Unexpected Anthropic response: {json.dumps(data)[:300]}") from exc
+
+    def stream_chat(
+        self, messages: List[ChatMessage], on_token: Optional[Callable[[str], None]] = None
+    ) -> ChatResult:
+        system_msg = ""
+        user_messages = []
+        for m in messages:
+            if m.role == "system":
+                system_msg += m.content + "\n"
+            else:
+                user_messages.append({"role": m.role, "content": m.content})
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": user_messages,
+            "max_tokens": 1024,
+            "stream": True,
+            "temperature": self.settings.ai_temperature,
+        }
+        if system_msg:
+            payload["system"] = system_msg.strip()
+
+        url = f"{self.base_url}/v1/messages"
+        full_text: List[str] = []
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream("POST", url, json=payload, headers=self._headers()) as r:
+                    ctype = r.headers.get("content-type", "")
+                    if "text/event-stream" not in ctype:
+                        r.read()
+                        data = r.json()
+                        text = data["content"][0]["text"]
+                        if on_token:
+                            on_token(text)
+                        return ChatResult(text=text, model=self.model)
+
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            chunk = line[len("data:"):].strip()
+                            try:
+                                obj = json.loads(chunk)
+                                if obj.get("type") == "content_block_delta":
+                                    delta = obj.get("delta", {}).get("text", "")
+                                    if delta:
+                                        full_text.append(delta)
+                                        if on_token:
+                                            on_token(delta)
+                            except json.JSONDecodeError:
+                                continue
+        except httpx.HTTPError as exc:
+            raise AIError(f"Anthropic streaming failed: {exc}") from exc
+
+        text = "".join(full_text)
+        if not text:
+            text = self.generate(messages)
+            if on_token:
+                on_token(text)
+        return ChatResult(text=text, model=self.model)
+
+    def plan(self, task: str, context: str) -> Plan:
+        messages = [
+            ChatMessage("system",
+                        "You are a coding agent. Given a task and repository "
+                        "context, produce a concise plan as JSON with keys "
+                        "'summary' (string) and 'steps' (array of strings). "
+                        "Return ONLY JSON."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nContext:\n{context[:6000]}\n\n"
+                        "Return ONLY JSON."),
+        ]
+        text = self.generate(messages)
+        return _parse_plan_json(text, fallback_task=task)
+
+    def edit(self, task: str, plan: Plan, files: List[dict]) -> List[dict]:
+        files_brief = "\n".join(f["path"] for f in files[:30])
+        messages = [
+            ChatMessage("system",
+                        "You are a coding agent. Given a task and a list of "
+                        "file paths, return a JSON array of edits. Each edit: "
+                        '{"path": "...", "content": "full new file content"}. '
+                        "Only include files you actually change. Return ONLY "
+                        "a JSON array."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
+                        f"Files:\n{files_brief}\n\nReturn ONLY a JSON array."),
+        ]
+        text = self.generate(messages)
+        return _parse_edits_json(text)
+
+    def analyze_error(self, task: str, error: str, files: List[dict]) -> str:
+        messages = [
+            ChatMessage("system",
+                        "A verification command failed. In one short sentence, "
+                        "describe the most likely cause and fix."),
+            ChatMessage("user", f"Error:\n{error[:1500]}"),
+        ]
+        return self.generate(messages).strip()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# JulesProvider — specialized adapter for Google's Jules agent
+# ────────────────────────────────────────────────────────────────────────
+class JulesProvider:
+    """Specialized adapter for Google's elite coding agent Jules."""
+
+    name = "jules"
+
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings or get_settings()
+        self.api_key = self.settings.effective_api_key()
+        if not self.api_key:
+            raise AIError("AI_API_KEY (or GEMINI_API_KEY) is not set; "
+                          "cannot use JulesProvider.")
+        self.base_url = (
+            self.settings.ai_base_url.rstrip("/")
+            or "https://api.jules.google.dev/v1"
+        )
+        self.model = self.settings.effective_model() or "jules-coding-v1"
+        self.timeout = self.settings.ai_timeout_seconds
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def generate(self, messages: List[ChatMessage], *,
+                 temperature: Optional[float] = None,
+                 max_tokens: Optional[int] = None) -> str:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": False,
+            "temperature": temperature if temperature is not None
+            else self.settings.ai_temperature,
+        }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        url = f"{self.base_url}/chat/completions"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                r = client.post(url, json=payload, headers=self._headers())
+                r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise AIError(f"Jules request failed: {exc}") from exc
+        data = r.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIError(f"Unexpected Jules response: {json.dumps(data)[:300]}") from exc
+
+    def stream_chat(
+        self, messages: List[ChatMessage], on_token: Optional[Callable[[str], None]] = None
+    ) -> ChatResult:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+            "temperature": self.settings.ai_temperature,
+        }
+        url = f"{self.base_url}/chat/completions"
+        full_text: List[str] = []
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream("POST", url, json=payload, headers=self._headers()) as r:
+                    ctype = r.headers.get("content-type", "")
+                    if "text/event-stream" not in ctype:
+                        r.read()
+                        data = r.json()
+                        text = data["choices"][0]["message"]["content"]
+                        if on_token:
+                            on_token(text)
+                        return ChatResult(text=text, model=self.model)
+
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk = line[len("data:"):].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(chunk)
+                            delta = obj["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                full_text.append(delta)
+                                if on_token:
+                                    on_token(delta)
+                        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                            continue
+        except httpx.HTTPError as exc:
+            raise AIError(f"Jules streaming request failed: {exc}") from exc
+        text = "".join(full_text)
+        if not text:
+            text = self.generate(messages)
+            if on_token:
+                on_token(text)
+        return ChatResult(text=text, model=self.model)
+
+    def plan(self, task: str, context: str) -> Plan:
+        messages = [
+            ChatMessage("system",
+                        "You are a coding agent. Given a task and repository "
+                        "context, produce a concise plan as JSON with keys "
+                        "'summary' (string) and 'steps' (array of strings). "
+                        "Return ONLY JSON."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nContext:\n{context[:6000]}\n\n"
+                        "Return ONLY JSON."),
+        ]
+        text = self.generate(messages)
+        return _parse_plan_json(text, fallback_task=task)
+
+    def edit(self, task: str, plan: Plan, files: List[dict]) -> List[dict]:
+        files_brief = "\n".join(f["path"] for f in files[:30])
+        messages = [
+            ChatMessage("system",
+                        "You are a coding agent. Given a task and a list of "
+                        "file paths, return a JSON array of edits. Each edit: "
+                        '{"path": "...", "content": "full new file content"}. '
+                        "Only include files you actually change. Return ONLY "
+                        "a JSON array."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
+                        f"Files:\n{files_brief}\n\nReturn ONLY a JSON array."),
+        ]
+        text = self.generate(messages)
+        return _parse_edits_json(text)
+
+    def analyze_error(self, task: str, error: str, files: List[dict]) -> str:
+        messages = [
+            ChatMessage("system",
+                        "A verification command failed. In one short sentence, "
+                        "describe the most likely cause and fix."),
+            ChatMessage("user", f"Error:\n{error[:1500]}"),
+        ]
+        return self.generate(messages).strip()
 
 
 # ── JSON parsing helpers ────────────────────────────────────────────────
@@ -498,6 +768,24 @@ def _parse_edits_json(text: str) -> List[dict]:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# KiloProvider — specialized adapter for Kilo AI Gateway
+# ────────────────────────────────────────────────────────────────────────
+class KiloProvider(OpenAIProvider):
+    """Adapter for Kilo AI Gateway (OpenAI-compatible)."""
+
+    name = "kilo"
+
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        super().__init__(settings=settings, provider_hint="kilo")
+        # Overwrite default base URL to Kilo Gateway
+        self.base_url = (
+            self.settings.ai_base_url.rstrip("/")
+            or "https://api.kilo.ai/api/gateway"
+        )
+        self.model = self.settings.ai_model or "anthropic/claude-3-5-sonnet"
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Factory — returns the configured provider, falling back to Local
 # ────────────────────────────────────────────────────────────────────────
 def get_provider(settings: Optional[Settings] = None) -> AIProvider:
@@ -505,10 +793,11 @@ def get_provider(settings: Optional[Settings] = None) -> AIProvider:
 
     Selection rules:
       * AI_PROVIDER=local (or unset)            -> LocalProvider
-      * AI_PROVIDER=gemini  + GEMINI_API_KEY    -> GeminiProvider (OpenAI-compat)
-      * AI_PROVIDER=openai  + AI_API_KEY        -> OpenAIProvider
-      * any other name with AI_API_KEY set      -> OpenAIProvider (hint=name)
-      * if the chosen provider can't be built    -> LocalProvider (graceful)
+      * AI_PROVIDER=gemini                      -> GeminiProvider
+      * AI_PROVIDER=anthropic                   -> AnthropicProvider
+      * AI_PROVIDER=jules                       -> JulesProvider
+      * AI_PROVIDER=kilo                        -> KiloProvider
+      * AI_PROVIDER=openai (or custom name)     -> OpenAIProvider
     """
     settings = settings or get_settings()
     name = (settings.ai_provider or "local").lower().strip()
@@ -520,6 +809,30 @@ def get_provider(settings: Optional[Settings] = None) -> AIProvider:
         if settings.effective_api_key():
             try:
                 return GeminiProvider(settings)
+            except AIError:
+                pass
+        return LocalProvider()
+
+    if name == "anthropic":
+        if settings.effective_api_key():
+            try:
+                return AnthropicProvider(settings)
+            except AIError:
+                pass
+        return LocalProvider()
+
+    if name == "jules":
+        if settings.effective_api_key():
+            try:
+                return JulesProvider(settings)
+            except AIError:
+                pass
+        return LocalProvider()
+
+    if name == "kilo":
+        if settings.effective_api_key():
+            try:
+                return KiloProvider(settings)
             except AIError:
                 pass
         return LocalProvider()
