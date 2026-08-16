@@ -32,6 +32,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+import asyncio
+
 from ai_provider import (
     AIError,
     ChatMessage,
@@ -39,8 +41,16 @@ from ai_provider import (
     Plan,
     get_provider,
 )
+from config import Settings, get_settings
+from github import GitHubError, clone_or_pull
+from models import EventType, TaskStatus
+from terminal import TerminalError, run_command, validate_command
+from workspace import Workspace, WorkspaceError
 
-import asyncio
+try:
+    from github_api_workspace import GitHubAPIWorkspace
+except ImportError:
+    GitHubAPIWorkspace = None
 
 
 def _run_async(coro):
@@ -74,15 +84,6 @@ def _run_async(coro):
         return result[0]
     else:
         return asyncio.run(coro)
-from config import Settings, get_settings
-from github import GitHubError, clone_or_pull
-from models import EventType, TaskStatus
-from terminal import TerminalError, run_command, validate_command
-from workspace import Workspace, WorkspaceError
-try:
-    from github_api_workspace import GitHubAPIWorkspace
-except ImportError:
-    GitHubAPIWorkspace = None
 
 log = logging.getLogger("pk_ninja.agent")
 

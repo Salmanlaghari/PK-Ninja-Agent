@@ -219,6 +219,7 @@ __marimo__/
 
 # ── PK Ninja Agent project entries ────────────────────────────────────────
 .env
+local.properties
 *.db
 *.db-journal
 workspaces/

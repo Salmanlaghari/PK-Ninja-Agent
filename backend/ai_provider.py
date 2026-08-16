@@ -1080,6 +1080,181 @@ def _parse_edits_json(text: str) -> List[dict]:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# DuetProvider — PK Agent via Duet AI API (https://ctl.duet.so)
+# ────────────────────────────────────────────────────────────────────────
+class DuetProvider:
+    """Adapter for Duet AI API (https://ctl.duet.so) power user backend for PK Agent.
+
+    Authenticates via ``Authorization: Bearer <DUET_API_KEY>``.
+    Includes connectivity verification endpoint (``GET /v1/whoami``) and
+    session/chat capabilities.
+    """
+
+    name = "duet"
+    model = "pk-agent-duet"
+
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings or get_settings()
+        self.api_key = self.settings.effective_duet_key()
+        if not self.api_key:
+            raise AIError("DUET_API_KEY is not set; cannot use DuetProvider.")
+        self.base_url = (
+            self.settings.duet_base_url.rstrip("/")
+            or "https://ctl.duet.so"
+        )
+        self.timeout = self.settings.ai_timeout_seconds
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def whoami(self) -> Dict[str, Any]:
+        """Connectivity and credential verification check via GET /v1/whoami."""
+        url = f"{self.base_url}/v1/whoami"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                r = client.get(url, headers=self._headers())
+                r.raise_for_status()
+                return r.json()
+        except httpx.HTTPError as exc:
+            raise AIError(f"Duet whoami check failed: {exc}") from exc
+
+    def generate(self, messages: List[ChatMessage], *,
+                 stream: bool = False, temperature: Optional[float] = None,
+                 max_tokens: Optional[int] = None) -> str:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": False,
+            "temperature": temperature if temperature is not None
+            else self.settings.ai_temperature,
+        }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        url_chat = f"{self.base_url}/v1/chat/completions"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                r = client.post(url_chat, json=payload, headers=self._headers())
+                if r.status_code == 404:
+                    url_session = f"{self.base_url}/v1/sessions"
+                    prompt = _messages_to_prompt(messages)
+                    r = client.post(url_session, json={"prompt": prompt}, headers=self._headers())
+                r.raise_for_status()
+                data = r.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    return data["choices"][0]["message"]["content"]
+                if "response" in data:
+                    return str(data["response"])
+                if "text" in data:
+                    return str(data["text"])
+                if "message" in data:
+                    return str(data["message"])
+                return json.dumps(data)
+        except httpx.HTTPError as exc:
+            raise AIError(f"Duet AI request failed: {exc}") from exc
+
+    def stream_chat(
+        self, messages: List[ChatMessage], on_token: Optional[Callable[[str], None]] = None
+    ) -> ChatResult:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+            "temperature": self.settings.ai_temperature,
+        }
+        url = f"{self.base_url}/v1/chat/completions"
+        full_text: List[str] = []
+        finish_reason = "stop"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream("POST", url, json=payload, headers=self._headers()) as r:
+                    if r.status_code == 404:
+                        text = self.generate(messages)
+                        if on_token:
+                            on_token(text)
+                        return ChatResult(text=text, model=self.model)
+                    r.raise_for_status()
+                    ctype = r.headers.get("content-type", "")
+                    if "text/event-stream" not in ctype:
+                        r.read()
+                        data = r.json()
+                        text = data.get("choices", [{}])[0].get("message", {}).get("content", "") or json.dumps(data)
+                        if on_token:
+                            on_token(text)
+                        return ChatResult(text=text, model=self.model)
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk = line[len("data:"):].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(chunk)
+                            delta = obj["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                full_text.append(delta)
+                                if on_token:
+                                    on_token(delta)
+                            fr = obj["choices"][0].get("finish_reason")
+                            if fr:
+                                finish_reason = fr
+                        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                            continue
+        except httpx.HTTPError as exc:
+            raise AIError(f"Duet AI streaming request failed: {exc}") from exc
+
+        text = "".join(full_text)
+        if not text:
+            text = self.generate(messages)
+            if on_token:
+                on_token(text)
+        return ChatResult(text=text, model=self.model, finish_reason=finish_reason)
+
+    def plan(self, task: str, context: str) -> Plan:
+        messages = [
+            ChatMessage("system",
+                        "You are PK Agent powered by Duet AI. Given a task and repository "
+                        "context, produce a concise plan as JSON with keys "
+                        "'summary' (string) and 'steps' (array of strings). "
+                        "Return ONLY JSON."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nContext:\n{context[:6000]}\n\n"
+                        "Return ONLY JSON."),
+        ]
+        text = self.generate(messages)
+        return _parse_plan_json(text, fallback_task=task)
+
+    def edit(self, task: str, plan: Plan, files: List[dict]) -> List[dict]:
+        files_brief = "\n".join(f["path"] for f in files[:30])
+        messages = [
+            ChatMessage("system",
+                        "You are PK Agent powered by Duet AI. Given a task and a list of "
+                        "file paths, return a JSON array of edits. Each edit: "
+                        '{"path": "...", "content": "full new file content"}. '
+                        "Only include files you actually change. Return ONLY "
+                        "a JSON array."),
+            ChatMessage("user",
+                        f"Task:\n{task}\n\nPlan: {plan.summary}\n\n"
+                        f"Files:\n{files_brief}\n\nReturn ONLY a JSON array."),
+        ]
+        text = self.generate(messages)
+        return _parse_edits_json(text)
+
+    def analyze_error(self, task: str, error: str, files: List[dict]) -> str:
+        messages = [
+            ChatMessage("system",
+                        "A verification command failed. In one short sentence, "
+                        "describe the most likely cause and fix."),
+            ChatMessage("user", f"Error:\n{error[:1500]}"),
+        ]
+        return self.generate(messages).strip()
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Factory — returns the configured provider, falling back to Local
 # ────────────────────────────────────────────────────────────────────────
 def get_provider(settings: Optional[Settings] = None) -> AIProvider:
@@ -1110,6 +1285,14 @@ def get_provider(settings: Optional[Settings] = None) -> AIProvider:
         if settings.effective_api_key():
             try:
                 return AnthropicProvider(settings)
+            except AIError:
+                pass
+        return LocalProvider()
+
+    if name == "duet":
+        if settings.effective_duet_key():
+            try:
+                return DuetProvider(settings)
             except AIError:
                 pass
         return LocalProvider()

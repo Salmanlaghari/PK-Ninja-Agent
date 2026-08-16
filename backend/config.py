@@ -107,6 +107,14 @@ class Settings(BaseSettings):
         alias="BUILTIN_AI_API_KEY",
     )
 
+    # ── Duet AI / PK Agent API (v1.6.0) ─────────────────────────────────
+    # Dedicated API key for the Duet AI API / PK Agent.
+    # Auth uses Bearer authorization (Authorization: Bearer <DUET_API_KEY>).
+    duet_api_key: str = Field(default="", alias="DUET_API_KEY")
+    duet_base_url: str = Field(
+        default="https://ctl.duet.so", alias="DUET_BASE_URL"
+    )
+
     # ── Jules (Google's async coding agent) — official REST API (v1.1.0) ────
     # Dedicated API key for the official Jules API at
     # https://jules.googleapis.com/v1alpha. Auth uses the x-goog-api-key
@@ -278,6 +286,25 @@ class Settings(BaseSettings):
         """Resolve the API key from either the new or legacy env vars."""
         return self.ai_api_key or self.gemini_api_key or self.mimo_api_key
 
+    def effective_duet_key(self) -> str:
+        """Resolve the Duet API key.
+
+        Priority (highest first):
+          1. ``DUET_API_KEY`` env var
+          2. ``AI_API_KEY`` env var (generic)
+          3. ``JULES_API_KEY`` / ``GEMINI_API_KEY`` legacy env vars
+          4. The built-in default key (``BUILTIN_AI_API_KEY``)
+        """
+        if self.duet_api_key:
+            return self.duet_api_key
+        if self.ai_api_key:
+            return self.ai_api_key
+        if self.jules_api_key:
+            return self.jules_api_key
+        if self.gemini_api_key:
+            return self.gemini_api_key
+        return self.builtin_ai_api_key or ""
+
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
         return self.ai_model or self.gemini_model
@@ -330,20 +357,21 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# Mutate os.environ from a .env file if present (so subprocesses/gh see vars too).
+# Mutate os.environ from .env and local.properties files if present (so subprocesses/gh see vars too).
 def load_dotenv_into_environ(path: str = ".env") -> None:
-    env_path = Path(path)
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for p in (path, "local.properties"):
+        env_path = Path(p)
+        if not env_path.exists():
             continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("//") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 load_dotenv_into_environ()
