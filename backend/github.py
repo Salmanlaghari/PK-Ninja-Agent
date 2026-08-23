@@ -59,6 +59,52 @@ def _masked_clone_url(owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+# ── Dulwich (pure-Python git) helpers — serverless full GitHub access ──────
+def has_git_binary() -> bool:
+    import shutil
+    return shutil.which("git") is not None
+
+
+def dulwich_available() -> bool:
+    try:
+        import dulwich  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _github_token_for_git(settings: Optional[Settings]) -> str:
+    return (os.environ.get("GITHUB_TOKEN", "")
+            or os.environ.get("GH_TOKEN", "")
+            or getattr(settings, "github_token", "") or "")
+
+
+def dulwich_clone_or_pull(workspace: Workspace,
+                          settings: Settings) -> CommandResult:
+    """Clone/pull using pure-Python dulwich (no git binary required).
+
+    The token is embedded only in the in-memory URL and is never logged or
+    returned to the client.
+    """
+    token = _github_token_for_git(settings)
+    full = settings.github_repo_full()
+    url = (f"https://{token}@github.com/{full}.git" if token
+           else f"https://github.com/{full}.git")
+    try:
+        from dulwich import porcelain
+        if workspace.has_git_repo():
+            porcelain.pull(str(workspace.root), url)
+            out = f"pulled {full} via dulwich"
+        else:
+            porcelain.clone(url, str(workspace.root), depth=1)
+            out = f"cloned {full} via dulwich"
+        return CommandResult(command="dulwich", returncode=0,
+                             stdout=out, stderr="")
+    except Exception as exc:  # noqa: BLE001 — surface a clean failure
+        return CommandResult(command="dulwich", returncode=1, stdout="",
+                             stderr=f"dulwich failed: {exc}"[:400])
+
+
 def _run(args, cwd, timeout=60) -> CommandResult:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -196,11 +242,22 @@ def clone_or_pull(workspace: Workspace,
 
     If the workspace already has a ``.git`` dir, runs ``git pull``; otherwise
     clones into the workspace root. Returns the CommandResult of the last op.
+
+    v1.6.1: on runtimes without a git binary (e.g. Vercel serverless), falls
+    back to Dulwich — a pure-Python git implementation — so clone/pull still
+    work with full token authentication.
     """
     settings = settings or workspace.settings
     full = settings.github_repo_full()
     if not full:
         raise GitHubError("GITHUB_OWNER / GITHUB_REPO are not configured.")
+
+    if not has_git_binary():
+        if not dulwich_available():
+            raise GitHubError(
+                "git binary not found and dulwich not installed — cannot "
+                "clone/pull on this runtime. Add 'dulwich' to requirements.")
+        return dulwich_clone_or_pull(workspace, settings)
 
     if workspace.has_git_repo():
         # Reset to origin default branch then pull.

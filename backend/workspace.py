@@ -271,6 +271,9 @@ class Workspace:
         return self._git(["add", "-A"])
 
     def git_commit(self, message: str) -> CommandResult:
+        # v1.6.1: no git binary (serverless) → dulwich pure-Python commit.
+        if shutil.which("git") is None:
+            return self._dulwich_commit(message)
         # Use -F to avoid shell-escaping issues with the message.
         import tempfile
         with tempfile.NamedTemporaryFile(
@@ -283,12 +286,55 @@ class Workspace:
         finally:
             os.unlink(msg_file)
 
+    def _dulwich_commit(self, message: str) -> CommandResult:
+        try:
+            from dulwich import porcelain
+            porcelain.add(self.root)
+            author = (os.environ.get("GIT_AUTHOR_NAME", "PK Ninja Agent")
+                      + " <" + os.environ.get("GIT_AUTHOR_EMAIL",
+                                              "agent@pk-ninja.dev") + ">")
+            sha = porcelain.commit(str(self.root), message=message, author=author)
+            if isinstance(sha, bytes):
+                sha = sha.decode("utf-8", "replace")
+            return CommandResult(command="dulwich commit", returncode=0,
+                                 stdout=str(sha), stderr="")
+        except Exception as exc:  # noqa: BLE001
+            return CommandResult(command="dulwich commit", returncode=1,
+                                 stdout="", stderr=f"dulwich commit failed: {exc}"[:400])
+
     def git_push(self, remote: str = "origin",
                  branch: Optional[str] = None) -> CommandResult:
         branch = branch or self.git_current_branch()
         if not branch:
             raise WorkspaceError("No current branch to push.")
+        if shutil.which("git") is None:
+            return self._dulwich_push(branch)
         return self._git(["push", "-u", remote, branch], timeout=60)
+
+    def _dulwich_current_branch(self) -> str:
+        head = (self.root / ".git" / "HEAD")
+        if head.exists():
+            txt = head.read_text().strip()
+            if txt.startswith("ref: refs/heads/"):
+                return txt.rsplit("/", 1)[-1]
+        return "main"
+
+    def _dulwich_push(self, branch: Optional[str] = None) -> CommandResult:
+        try:
+            from dulwich import porcelain
+            token = (os.environ.get("GITHUB_TOKEN", "")
+                     or os.environ.get("GH_TOKEN", "")
+                     or getattr(self.settings, "github_token", "") or "")
+            full = self.settings.github_repo_full()
+            url = (f"https://{token}@github.com/{full}.git" if token
+                   else f"https://github.com/{full}.git")
+            b = branch or self._dulwich_current_branch()
+            porcelain.push(str(self.root), url, refspecs=f"refs/heads/{b}")
+            return CommandResult(command=f"dulwich push {b}", returncode=0,
+                                 stdout=f"pushed {b} to {full}", stderr="")
+        except Exception as exc:  # noqa: BLE001
+            return CommandResult(command="dulwich push", returncode=1,
+                                 stdout="", stderr=f"dulwich push failed: {exc}"[:400])
 
     def has_git_repo(self) -> bool:
         return (self.root / ".git").exists()

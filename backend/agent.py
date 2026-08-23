@@ -488,6 +488,13 @@ class Agent:
         the task description and calls the GitHub API via the ``gh`` CLI.
         """
         task_l = self.description.lower().strip()
+        # Chat mode folds earlier turns into the description as a transcript.
+        # Intent matching must look at the NEW user message only, otherwise
+        # an old "clone karo" re-triggers on every follow-up question.
+        _marker = "[new user message]"
+        _idx = task_l.rfind(_marker)
+        if _idx != -1:
+            task_l = task_l[_idx + len(_marker):].strip()
 
         # ── Detect "clone / switch repo" requests (v1.6.1) ────────────────
         # Serverless runtimes have no git binary, so a literal `git clone`

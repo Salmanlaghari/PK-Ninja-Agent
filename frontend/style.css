@@ -1928,3 +1928,14 @@ body.theme-cyber .login-input {
 .msg.agent .msg-answer { color: #0d1117 !important; }
 .msg.agent .msg-status { color: #39424d; }
 .msg.agent details.chat-steps summary { color: #39506b; }
+
+/* v1.6.1 — terminal mobile-friendly */
+@media (max-width: 960px) {
+  #panel-terminal .terminal-sidebar {
+    height: 180px;
+    max-height: 40vh;
+    font-size: 11px;
+  }
+  .term-input-row { flex-wrap: nowrap; gap: 6px; }
+  .term-input { font-size: 12px; padding: 8px; }
+}
