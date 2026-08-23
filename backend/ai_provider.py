@@ -1052,17 +1052,61 @@ def _parse_unidiff(unidiff: str) -> List[dict]:
 
 # ── JSON parsing helpers ────────────────────────────────────────────────
 def _parse_plan_json(text: str, fallback_task: str) -> Plan:
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return Plan(summary="Plan unavailable; using fallback.",
+    """Parse a plan from model output, tolerating common wrapper noise.
+
+    Handles markdown code fences, leading/trailing prose around the JSON,
+    and uses raw_decode so text after the JSON object is ignored.
+    """
+    if not text or not text.strip():
+        return Plan(summary=f"Plan for: {fallback_task[:80]}",
                     steps=["Review task."])
-    try:
-        obj = json.loads(m.group(0))
-        return Plan(summary=obj.get("summary", "Plan"),
-                    steps=obj.get("steps", ["Review task."]))
-    except json.JSONDecodeError:
-        return Plan(summary="Plan unavailable; using fallback.",
-                    steps=["Review task and repository."])
+    cleaned = re.sub(r"```(?:json)?", "", text)
+    # Fast path: greedy match like before.
+    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    candidates = []
+    if m:
+        candidates.append(m.group(0))
+    # Robust path: balanced-brace scan from the first '{' — survives prose
+    # before/after the JSON and nested braces inside strings.
+    start = cleaned.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(cleaned)):
+            c = cleaned[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.insert(0, cleaned[start:i + 1])
+                        break
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+            steps = obj.get("steps") or ["Review task."]
+            if isinstance(steps, list):
+                steps = [str(s) for s in steps if s] or ["Review task."]
+            summary = obj.get("summary") or f"Plan for: {fallback_task[:80]}"
+            return Plan(summary=str(summary), steps=steps)
+        except json.JSONDecodeError:
+            continue
+    # Last resort: no JSON at all — use the model's own text as the answer
+    # step instead of a generic "unavailable" message.
+    snippet = cleaned.strip().splitlines()[0][:120] if cleaned.strip() else fallback_task[:120]
+    return Plan(summary=snippet or f"Plan for: {fallback_task[:80]}",
+                steps=["Review task and respond."])
 
 
 def _parse_edits_json(text: str) -> List[dict]:
