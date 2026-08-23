@@ -170,7 +170,12 @@
 
       <!-- Chat Panel (v1.6.0) -->
       <section class="panel tab-content active-tab" id="tab-chat">
-        <div class="panel-head"><span class="ico">💬</span> NinjaDev Chat</div>
+        <div class="panel-head chat-head">
+          <span class="ico">💬</span> NinjaDev Chat
+          <select id="chat-repo-select" class="chat-repo-select" title="Active repository">
+            <option value="">📂 Repo: default</option>
+          </select>
+        </div>
         <div class="panel-body chat-body">
           <div id="chat-thread" class="chat-thread">
             <div class="chat-welcome empty-state">🥷 Salaam! Main NinjaDev hoon — coding, debugging, ya kuch bhi poochein. Message likhein aur send karein.</div>

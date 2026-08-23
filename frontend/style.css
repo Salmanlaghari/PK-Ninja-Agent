@@ -1897,3 +1897,34 @@ body.theme-cyber .login-input {
   height: 42px;
   font-size: 16px;
 }
+
+/* v1.6.1 — repo selector in chat header */
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.chat-repo-select {
+  margin-left: auto;
+  max-width: 240px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: var(--bg-elev, #161b22);
+  color: var(--text, #e6edf3);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* v1.6.1 — agent bubble: light background + black text */
+.msg.agent {
+  align-self: flex-start;
+  background: #f0f6fc !important;
+  border: 1px solid rgba(88,166,255,0.45);
+  border-left: 3px solid #58a6ff;
+  border-bottom-left-radius: 4px;
+  color: #0d1117 !important;
+}
+.msg.agent .msg-answer { color: #0d1117 !important; }
+.msg.agent .msg-status { color: #39424d; }
+.msg.agent details.chat-steps summary { color: #39506b; }

@@ -2227,6 +2227,31 @@ const chatThread = $("chat-thread");
 const chatInput = $("task");
 const chatHistory = [];   // [{role:"user"|"assistant", content}]
 let chatBusy = false;
+let selectedRepo = "";    // "owner/name" chosen in the header dropdown
+
+async function loadChatRepos() {
+  const sel = $("chat-repo-select");
+  if (!sel) return;
+  try {
+    const r = await fetch("/api/github/repos");
+    if (!r.ok) return;
+    const data = await r.json();
+    const repos = data.repos || [];
+    if (!repos.length) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">📂 Repo: default</option>' +
+      repos.map(x => `<option value="${x.full_name}">${x.full_name}</option>`).join("");
+    if (current) sel.value = current;
+  } catch {}
+}
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.id === "chat-repo-select") {
+    selectedRepo = e.target.value || "";
+    toast(selectedRepo ? `Active repo: ${selectedRepo}` : "Default repo restored", "ok");
+    refreshGitPanel();
+    refreshExplorerTree();
+  }
+});
 
 function scrollChat() {
   chatThread.scrollTop = chatThread.scrollHeight;
@@ -2326,10 +2351,10 @@ async function sendChat() {
     const r = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         description: msg,
         history: chatHistory.slice(-6),
-      }),
+      }, selectedRepo ? { repository: selectedRepo } : {})),
       signal: ctrl.signal,
     });
     clearTimeout(timeoutT);
@@ -2773,4 +2798,5 @@ async function bootApp() {
   UI.hideLoading();
 }
 
+loadChatRepos();
 bootApp();

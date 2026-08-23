@@ -489,6 +489,76 @@ class Agent:
         """
         task_l = self.description.lower().strip()
 
+        # ── Detect "clone / switch repo" requests (v1.6.1) ────────────────
+        # Serverless runtimes have no git binary, so a literal `git clone`
+        # can never work. Instead we rebind the task's workspace to the
+        # requested repository through the GitHub API, so its real files are
+        # fetched immediately and follow-up messages operate on that repo.
+        if "clone" in task_l or ("switch" in task_l and "repo" in task_l):
+            import re as _re
+            mm = _re.search(
+                r"(?:clone|switch|open)[a-z\s]*?(?:repo\s+)?([a-z0-9][a-z0-9._\-]*)",
+                task_l)
+            hint = mm.group(1) if mm else ""
+            try:
+                from github import list_user_repos as _lur
+                repos = _lur(self.settings, limit=100)
+            except Exception as exc:
+                self.emit(EventType.error, f"GitHub repos fetch failed: {exc}")
+                return True
+            target = None
+            for cand in repos:
+                nm = (cand.get("name") or "").lower().replace("-", "").replace("_", "")
+                fh = hint.replace("-", "").replace("_", "")
+                if hint and (hint in nm or fh == nm):
+                    target = cand
+                    break
+            if not target:
+                names = ", ".join((c.get("name") or "") for c in repos[:20])
+                self.emit(EventType.info,
+                          f"'{hint}' naam koi repo nahi mili aapke account mein.")
+                self.emit(EventType.info,
+                          f"Aapki repos: {names}")
+                self.emit(EventType.completed,
+                          "Repo select karein (upar dropdown) ya sahi naam likhein.",
+                          status="success")
+                return True
+
+            full = target.get("full_name") or ""
+            owner, _, rname = full.partition("/")
+            self.emit(EventType.info,
+                      f"Repo mil gayi: {full}"
+                      + (f" — {target.get('description')}" if target.get("description") else ""))
+            token = (os.environ.get("GITHUB_TOKEN", "")
+                     or os.environ.get("GH_TOKEN", "")
+                     or getattr(self.settings, "github_token", ""))
+            if GitHubAPIWorkspace and token:
+                try:
+                    new_ws = GitHubAPIWorkspace(
+                        self.task_id, settings=self.settings, repo_full=full,
+                        token=token)
+                    count = new_ws.fetch_repo_files()
+                    if count > 0:
+                        rt.workspace = new_ws
+                        self.emit(EventType.info,
+                                  f"{full} ka workspace ready ({count} files) — "
+                                  "ye ab active repository hai.")
+                    else:
+                        self.emit(EventType.info, f"{full}: 0 files fetched.")
+                except Exception as exc:
+                    self.emit(EventType.error, f"Switch failed: {exc}")
+            # Best-effort persistence for this warm instance.
+            try:
+                os.environ["GITHUB_OWNER"] = owner
+                os.environ["GITHUB_REPO"] = rname
+            except Exception:  # noqa: BLE001
+                pass
+            self.emit(EventType.completed,
+                      f"{rname} ab active repo hai — agla message isi par kaam karega. "
+                      "(Har message ke saath upar wala repo dropdown bhi use kar sakte hain.)",
+                      status="success")
+            return True
+
         # ── Detect "show/list my repos" ──
         repo_list_patterns = [
             "show me my repo", "show my repo", "list my repo",
