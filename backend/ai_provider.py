@@ -339,6 +339,10 @@ class OpenAIProvider:
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": True,
             "temperature": self.settings.ai_temperature,
+            # Generous budget: reasoning-style models (e.g. gpt-oss) spend
+            # hidden reasoning tokens from this budget, so a small/absent
+            # limit truncates the visible content mid-JSON.
+            "max_tokens": 8192,
         }
         url = f"{self.base_url}/chat/completions"
         full_text: List[str] = []
