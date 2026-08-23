@@ -2242,16 +2242,24 @@ function addChatMsg(role) {
 
 function extractReplyFromEvents(events) {
   const stepResults = [];
+  const infoLines = [];   // real content from info events (repo lists, tool output…)
   let thinking = "";
   let planSteps = [];
   let completedMsg = "";
+  // Boilerplate progress messages that never belong in a chat reply.
+  const BOILER = /^(Workspace ready|Repository fetched|Indexing repository|Repository indexed:|Starting step|Successfully finished step|Session started|Understanding the task|No verification command)/i;
   for (const ev of events || []) {
     if (ev.type === "thinking") {
       thinking += ((ev.data && ev.data.token) || ev.message || "");
     } else if (ev.type === "planning") {
       planSteps = (ev.data && ev.data.steps) || [];
-    } else if (ev.type === "info" && /finished by agent/i.test(ev.message || "")) {
-      stepResults.push(ev.message.replace(/^.*finished by agent:\s*/i, ""));
+    } else if (ev.type === "info") {
+      const m = ev.message || "";
+      if (/finished by agent/i.test(m)) {
+        stepResults.push(m.replace(/^.*finished by agent:\s*/i, ""));
+      } else if (!BOILER.test(m)) {
+        infoLines.push(m);
+      }
     } else if (ev.type === "completed") {
       completedMsg = ev.message || "";
     }
@@ -2260,6 +2268,11 @@ function extractReplyFromEvents(events) {
   let reply = "";
   for (let i = stepResults.length - 1; i >= 0; i--) {
     if (!/^fallback/i.test(stepResults[i])) { reply = stepResults[i]; break; }
+  }
+  // Exploration/tool answers (e.g. "repo list dikhao") come through as info
+  // events — surface them instead of a bare "completed".
+  if (!reply && infoLines.length) {
+    reply = infoLines.slice(-40).join("\n");
   }
   if (!reply && thinking.trim()) reply = thinking.trim().split("\n").slice(-8).join("\n");
   if (!reply) reply = completedMsg || "Ho gaya!";
