@@ -1500,6 +1500,23 @@ async def api_create_task(body: TaskCreate,
                           user: User = Depends(current_user)) -> dict:
     task_id = new_task_id()
     fresh = get_settings()
+    # v1.6.0 chat mode: fold recent conversation turns into the task text so
+    # follow-up chat messages keep context of earlier exchanges.
+    description = body.description
+    if body.history:
+        try:
+            turns = []
+            for turn in body.history[-6:]:
+                role = "User" if turn.get("role") == "user" else "Agent"
+                content = str(turn.get("content", "")).strip()[:600]
+                if content:
+                    turns.append(f"{role}: {content}")
+            if turns:
+                transcript = "\n".join(turns)
+                description = (f"[Conversation so far]\n{transcript}\n"
+                               f"\n[New user message]\n{body.description}")
+        except Exception:  # noqa: BLE001 — history is best-effort context
+            description = body.description
     # v1.2.0: resolve per-user settings (stored API key, provider pref,
     # GitHub token) so the agent uses the user's credentials instead of
     # only the server env vars.
@@ -1508,7 +1525,7 @@ async def api_create_task(body: TaskCreate,
     except Exception:  # noqa: BLE001 — never let secret-store issues block tasks
         user_settings = fresh
     repo = body.repository or user_settings.github_repo_full()
-    await db_create_task(task_id, body.description, repo)
+    await db_create_task(task_id, description, repo)
     # v0.8.0: when the autonomous scheduler is enabled, enqueue the task so the
     # background worker picks it up by priority. Otherwise (default) keep the
     # original fire-and-forget behaviour for full backward compatibility.
@@ -1516,7 +1533,7 @@ async def api_create_task(body: TaskCreate,
     if sched is not None and getattr(fresh, "scheduler_enabled", False):
         item = sched.enqueue(
             task_id=task_id,
-            description=body.description,
+            description=description,
             repo_full=repo,
             enqueued_at=_dt.datetime.utcnow().timestamp(),
             depends_on=body.depends_on,
@@ -1529,7 +1546,7 @@ async def api_create_task(body: TaskCreate,
     if is_serverless():
         import concurrent.futures
         from agent import Agent
-        agent = Agent(task_id, body.description, repo_full=repo, settings=user_settings)
+        agent = Agent(task_id, description, repo_full=repo, settings=user_settings)
         status = "failed"
         # Vercel enforces vercel.json maxDuration (60s). If the provider call
         # (e.g. a slow/async provider) exceeds it, the platform kills the
@@ -1562,7 +1579,7 @@ async def api_create_task(body: TaskCreate,
         status = agent.rt.status.value if agent.rt else "failed"
         return {"task_id": task_id, "status": status,
                 "repository": repo, "sync": True}
-    start_task(task_id, body.description, repo_full=repo, settings=user_settings)
+    start_task(task_id, description, repo_full=repo, settings=user_settings)
     return {"task_id": task_id, "status": TaskStatus.running.value,
             "repository": repo}
 

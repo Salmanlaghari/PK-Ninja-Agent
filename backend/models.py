@@ -68,6 +68,9 @@ class TaskCreate(BaseModel):
     description: str = Field(..., min_length=1, max_length=4000)
     repository: Optional[str] = None  # "owner/repo" override; else uses config
     depends_on: Optional[List[str]] = None  # task IDs this task depends on
+    # v1.6.0 chat mode: recent conversation turns so follow-up messages keep
+    # context. Each turn: {"role": "user"|"assistant", "content": str}.
+    history: Optional[List[dict]] = None
 
 
 class TaskSummary(BaseModel):

@@ -2219,90 +2219,183 @@ async function loadRepo() {
 }
 
 // ── Start task ──────────────────────────────────────────────────────────
-startBtn.addEventListener("click", async () => {
-  const desc = $("task").value.trim();
-  if (!desc) { toast("Enter a task first.", "err"); return; }
+// ── Chat mode (v1.6.0) ──────────────────────────────────────────────────
+// Conversational interface: each user message becomes a task; the agent's
+// answer is rendered as a chat bubble. Recent turns are sent as `history`
+// so follow-up messages keep context.
+const chatThread = $("chat-thread");
+const chatInput = $("task");
+const chatHistory = [];   // [{role:"user"|"assistant", content}]
+let chatBusy = false;
+
+function scrollChat() {
+  chatThread.scrollTop = chatThread.scrollHeight;
+}
+
+function addChatMsg(role) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  chatThread.appendChild(div);
+  scrollChat();
+  return div;
+}
+
+function extractReplyFromEvents(events) {
+  const stepResults = [];
+  let thinking = "";
+  let planSteps = [];
+  let completedMsg = "";
+  for (const ev of events || []) {
+    if (ev.type === "thinking") {
+      thinking += ((ev.data && ev.data.token) || ev.message || "");
+    } else if (ev.type === "planning") {
+      planSteps = (ev.data && ev.data.steps) || [];
+    } else if (ev.type === "info" && /finished by agent/i.test(ev.message || "")) {
+      stepResults.push(ev.message.replace(/^.*finished by agent:\s*/i, ""));
+    } else if (ev.type === "completed") {
+      completedMsg = ev.message || "";
+    }
+  }
+  // Prefer the last meaningful step result (skip generic fallback notes).
+  let reply = "";
+  for (let i = stepResults.length - 1; i >= 0; i--) {
+    if (!/^fallback/i.test(stepResults[i])) { reply = stepResults[i]; break; }
+  }
+  if (!reply && thinking.trim()) reply = thinking.trim().split("\n").slice(-8).join("\n");
+  if (!reply) reply = completedMsg || "Ho gaya!";
+  return { reply, stepResults, planSteps };
+}
+
+async function fetchTaskEvents(taskId) {
+  try {
+    const r = await fetch(`/api/tasks/${taskId}`);
+    if (!r.ok) return null;
+    return (await r.json()).events || [];
+  } catch { return null; }
+}
+
+async function sendChat() {
+  const msg = chatInput.value.trim();
+  if (!msg || chatBusy) return;
+  chatBusy = true;
+  chatInput.value = "";
   setRunningUI(true);
   closeTransport();
   sseFallbackUsed = false;
-  activity.innerHTML = "";
-  terminal.innerHTML = "";
-  thinkingLine = null;
-  setStatus("running", "Starting");
-  const planBox = $("execution-plan-box");
-  if (planBox) planBox.hidden = true;
-  // Guard against a hung request (serverless time limits, dead network):
-  // abort after ~75s so the user gets a clear error instead of an infinite
-  // spinner.
+  setStatus("running", "Working");
+
+  // User bubble
+  const userEl = addChatMsg("user");
+  userEl.textContent = msg;
+
+  // Agent pending bubble
+  const agentEl = addChatMsg("agent pending");
+  agentEl.innerHTML =
+    '<span class="typing-dots"><span></span><span></span><span></span></span> ' +
+    '<span class="msg-status">NinjaDev soch raha hai…</span>';
+  scrollChat();
+
+  // Guard against hung requests.
   const ctrl = new AbortController();
-  const timeoutT = setTimeout(() => ctrl.abort(), 75000);
+  const timeoutT = setTimeout(() => ctrl.abort(), 90000);
+
+  const fail = (text) => {
+    clearTimeout(timeoutT);
+    agentEl.classList.remove("pending");
+    agentEl.textContent = "✗ " + text;
+    setStatus("failed", "Error");
+    setRunningUI(false);
+    chatBusy = false;
+    scrollChat();
+  };
+
   try {
     const r = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description: desc }),
+      body: JSON.stringify({
+        description: msg,
+        history: chatHistory.slice(-6),
+      }),
       signal: ctrl.signal,
     });
     clearTimeout(timeoutT);
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) throw new Error((await r.text()).slice(0, 200));
     const data = await r.json();
     currentTaskId = data.task_id;
-    if (data.sync === true || data.status === "failed") {
-      // Serverless mode: the agent already ran inside the POST. Render the
-      // recorded events directly instead of waiting on a live stream.
-      await renderTaskEventsFromApi(currentTaskId);
+
+    // Serverless: POST returns after the run finishes. Local dev: poll.
+    let events = null;
+    if (data.sync === true) {
+      events = await fetchTaskEvents(currentTaskId);
     } else {
-      wsDead = false;
-      if ("WebSocket" in window && window.WebSocket) {
-        startWebSocket(currentTaskId);
-      } else {
-        startSSE(currentTaskId);
+      for (let i = 0; i < 60; i++) {
+        await new Promise(res => setTimeout(res, 2000));
+        const st = await fetch(`/api/tasks/${currentTaskId}`);
+        if (!st.ok) continue;
+        const t = await st.json();
+        events = t.events || [];
+        const last = [...events].reverse().find(e => e.type !== "thinking");
+        agentEl.querySelector(".msg-status").textContent =
+          "NinjaDev kaam kar raha hai… " + (last ? last.message.slice(0, 60) : "");
+        if (["success", "failed", "cancelled"].includes(t.status)) break;
       }
     }
-    if (data.status === "failed") {
-      setStatus("failed", "Failed");
-      setRunningUI(false);
-      toast("Agent failed - see activity log for details.", "err");
-    } else {
-      toast("Agent started", "ok");
+
+    const { reply, stepResults, planSteps } = extractReplyFromEvents(events || []);
+    agentEl.classList.remove("pending");
+    agentEl.innerHTML = "";
+
+    const ans = document.createElement("div");
+    ans.className = "msg-answer";
+    ans.textContent = reply;
+    agentEl.appendChild(ans);
+
+    if (stepResults.length > 1 || (planSteps && planSteps.length > 1)) {
+      const det = document.createElement("details");
+      det.className = "chat-steps";
+      const sum = document.createElement("summary");
+      sum.textContent = `Agent steps (${stepResults.length || planSteps.length})`;
+      det.appendChild(sum);
+      const ul = document.createElement("ul");
+      (stepResults.length ? stepResults : planSteps).forEach(s => {
+        const li = document.createElement("li");
+        li.textContent = typeof s === "string" ? s : (s.description || JSON.stringify(s));
+        ul.appendChild(li);
+      });
+      det.appendChild(ul);
+      agentEl.appendChild(det);
     }
 
-    // Switch to activity tab on mobile automatically
-    switchMobileTab("tab-activity");
+    chatHistory.push({ role: "user", content: msg });
+    chatHistory.push({ role: "assistant", content: reply });
 
-    // Reload task queue list
-    setTimeout(() => {
-      loadTasks();
-      refreshGitPanel();
-      refreshExplorerTree();
-    }, 1000);
+    setStatus("idle", "Idle");
+    setRunningUI(false);
+    chatBusy = false;
+    scrollChat();
+
+    setTimeout(() => { loadTasks(); refreshGitPanel(); refreshExplorerTree(); }, 800);
   } catch (e) {
     clearTimeout(timeoutT);
     const aborted = e && (e.name === "AbortError" || ctrl.signal.aborted);
-    setStatus("failed", aborted ? "Timeout" : "Error");
-    setRunningUI(false);
-    toast(aborted
-      ? "Server did not respond in time (timeout). Try again or check the provider."
-      : "Failed to start: " + e.message, "err");
-  }
-});
-
-// Fetch a finished task's event history and render it in the activity feed.
-async function renderTaskEventsFromApi(taskId) {
-  try {
-    const r = await fetch(`/api/tasks/${taskId}`);
-    if (!r.ok) return;
-    const task = await r.json();
-    if (task.events && task.events.length) {
-      task.events.forEach(renderEvent);
-    } else {
-      clearPlaceholders();
-      activity.innerHTML = '<div class="empty-state">No events recorded for this task.</div>';
-    }
-  } catch (e) {
-    console.error("renderTaskEventsFromApi failed", e);
+    fail(aborted ? "Timeout — server ne time par respond nahi kiya." :
+         ("Request failed: " + e.message));
   }
 }
+
+startBtn.addEventListener("click", sendChat);
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+// Auto-grow input up to a cap.
+chatInput.addEventListener("input", () => {
+  chatInput.style.height = "auto";
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px";
+});
 
 // ── Manual sandboxed terminal command ───────────────────────────────────
 async function runTerminalCommand() {
@@ -2443,12 +2536,11 @@ function switchMobileTab(targetTabId) {
   // Determine panels to hide/show
   // Map of tab IDs to HTML element IDs
   const tabMapping = {
-    "tab-task": $("tab-task"),
-    "tab-activity": $("tab-activity"),
+    "tab-chat": $("tab-chat"),
     "tab-explorer": $("panel-explorer"),
     "tab-git": $("panel-git"),
     "tab-diff": $("tab-diff"),
-    "tab-terminal": $("tab-terminal") // terminal lives in right column, matches mobile button target
+    "panel-terminal": $("panel-terminal") // terminal lives in the left sidebar
   };
 
   // We also have to handle tab content visibility inside right column
@@ -2492,7 +2584,7 @@ document.querySelectorAll(".mobile-tabs .tab-btn").forEach((btn) => {
 // ── Setup default tab classes for mobile (running in mobile width initially)
 function initMobileTabState() {
   if (window.innerWidth <= 960) {
-    switchMobileTab("tab-task");
+    switchMobileTab("tab-chat");
   } else {
     // Desktop width: restore sidebar visibility
     document.querySelectorAll(".workspace-sidebar .panel").forEach((pane) => {

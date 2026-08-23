@@ -43,8 +43,7 @@
 
   <!-- Mobile Tab Navigation (Only visible on Mobile) -->
   <nav class="mobile-tabs">
-    <button class="tab-btn active" data-tab="tab-task">✦ Task</button>
-    <button class="tab-btn" data-tab="tab-activity">🥷 Activity</button>
+    <button class="tab-btn active" data-tab="tab-chat">💬 Chat</button>
     <button class="tab-btn" data-tab="tab-explorer">📂 Explorer</button>
     <button class="tab-btn" data-tab="tab-git">⏧ Git</button>
     <button class="tab-btn" data-tab="tab-diff">∆ Diff</button>
@@ -54,8 +53,24 @@
   <!-- Main Grid Workspace Container -->
   <div class="workspace-layout wrap">
 
-    <!-- LEFT SIDEBAR: Tasks, Explorer, Git -->
+    <!-- LEFT SIDEBAR: Terminal, Tasks, Explorer, Git -->
     <aside class="workspace-sidebar">
+
+      <!-- Live Terminal Panel (left side) -->
+      <section class="panel" id="panel-terminal">
+        <div class="panel-head"><span class="ico">💻</span> Live Terminal</div>
+        <div class="panel-body">
+          <div id="terminal" class="terminal terminal-sidebar">
+            <div class="empty">Live output from real command execution will stream here.</div>
+          </div>
+          <div class="term-input-row">
+            <input id="term-input" class="term-input" type="text"
+              placeholder="Run a sandboxed command…"
+              autocomplete="off" spellcheck="false" disabled />
+            <button id="term-run" class="btn small" disabled>Run</button>
+          </div>
+        </div>
+      </section>
 
       <!-- Task Queue & History Panel -->
       <section class="panel" id="panel-tasks">
@@ -153,47 +168,21 @@
     <!-- RIGHT MAIN PANEL: Task input, Activity Timeline, Live Terminal, Diff Viewer -->
     <main class="workspace-main">
 
-      <!-- New Task Panel -->
-      <section class="panel tab-content" id="tab-task">
-        <div class="panel-head"><span class="ico">✦</span> New Task</div>
-        <div class="panel-body">
-          <textarea id="task" class="task-input"
-            placeholder="Describe a coding task, e.g. &#34;Add module docstrings to all Python files&#34; or &#34;Create a README.md describing the project&#34;"></textarea>
-          <div class="btn-row">
-            <button id="start" class="btn primary">⚔️ Start Agent</button>
-            <button id="cancel" class="btn danger" hidden>✖ Cancel</button>
+      <!-- Chat Panel (v1.6.0) -->
+      <section class="panel tab-content active-tab" id="tab-chat">
+        <div class="panel-head"><span class="ico">💬</span> NinjaDev Chat</div>
+        <div class="panel-body chat-body">
+          <div id="chat-thread" class="chat-thread">
+            <div class="chat-welcome empty-state">🥷 Salaam! Main NinjaDev hoon — coding, debugging, ya kuch bhi poochein. Message likhein aur send karein.</div>
           </div>
-        </div>
-      </section>
-
-      <!-- Activity Timeline Panel -->
-      <section class="panel tab-content" id="tab-activity">
-        <div class="panel-head"><span class="ico">🥷</span> Activity Timeline</div>
-        <div class="panel-body">
-          <!-- Live Step-by-Step Execution Plan -->
-          <div id="execution-plan-box" class="execution-plan-box" hidden>
-            <div class="execution-plan-title">📋 EXECUTION PLAN PROGRESS</div>
-            <div id="execution-steps" class="execution-steps"></div>
+          <div class="chat-input-row">
+            <textarea id="task" class="chat-input" rows="1"
+              placeholder="Message likhein… (coding task, sawaal, kuch bhi)"></textarea>
+            <button id="start" class="btn primary chat-send" title="Send">➤</button>
+            <button id="cancel" class="btn danger" hidden>✖</button>
           </div>
-          <div id="activity" class="activity">
-            <div class="empty-state">Agent activity timeline will stream here.</div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Live Terminal Panel -->
-      <section class="panel tab-content" id="tab-terminal">
-        <div class="panel-head"><span class="ico">💻</span> Live Terminal</div>
-        <div class="panel-body">
-          <div id="terminal" class="terminal">
-            <div class="empty">Live output from real command execution will stream here.</div>
-          </div>
-          <div class="term-input-row">
-            <input id="term-input" class="term-input" type="text"
-              placeholder="Run a sandboxed command (e.g. ls -la, python --version)…"
-              autocomplete="off" spellcheck="false" disabled />
-            <button id="term-run" class="btn small" disabled>Run</button>
-          </div>
+          <!-- Kept hidden: legacy renderEvent target so old code paths never crash -->
+          <div id="activity" class="activity" hidden></div>
         </div>
       </section>
 
