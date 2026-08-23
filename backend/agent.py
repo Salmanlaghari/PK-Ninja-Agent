@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 
 import datetime as _dt
+import json
 import logging
 import queue
 import signal
@@ -1236,11 +1237,27 @@ class Agent:
         ]
 
         provider = self._tool_provider()
+        # Cap tool history so big read_file results don't blow the context
+        # window (which surfaces as HTTP 400 on some providers).
+        capped_history = []
+        for entry in tool_history:
+            e = dict(entry)
+            if isinstance(e.get("result"), dict):
+                e["result"] = {
+                    k: (str(v)[:500] + "…" if len(str(v)) > 500 else v)
+                    for k, v in e["result"].items()
+                }
+            capped_history.append(e)
         last_error = None
+        supports_json_mode = type(provider).__name__ == "OpenAIProvider"
         for attempt in range(2):
             try:
                 if hasattr(provider, "generate"):
-                    text = provider.generate(messages)
+                    text = provider.generate(
+                        messages,
+                        max_tokens=4096 if attempt == 0 else None,
+                        json_mode=supports_json_mode,
+                    )
                 else:
                     res = provider.stream_chat(messages)
                     text = res.text
@@ -1272,7 +1289,7 @@ class Agent:
                         content=(
                             f"Task: {self.description}\n"
                             f"Step {step['id']}: {step['description']}\n"
-                            f"History: {json.dumps(tool_history, default=str)[:1500]}\n"
+                            f"History: {json.dumps(capped_history, default=str)[:1500]}\n"
                             "Next tool JSON:"
                         ),
                     ),

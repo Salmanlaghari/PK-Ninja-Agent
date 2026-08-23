@@ -305,7 +305,8 @@ class OpenAIProvider:
 
     def generate(self, messages: List[ChatMessage], *,
                  stream: bool = False, temperature: Optional[float] = None,
-                 max_tokens: Optional[int] = None) -> str:
+                 max_tokens: Optional[int] = None,
+                 json_mode: bool = False) -> str:
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -315,6 +316,8 @@ class OpenAIProvider:
         }
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         url = f"{self.base_url}/chat/completions"
         try:
             with httpx.Client(timeout=self.timeout) as client:
