@@ -2289,10 +2289,11 @@ function extractReplyFromEvents(events) {
       completedMsg = ev.message || "";
     }
   }
-  // Prefer the last meaningful step result (skip generic fallback notes).
+  // Prefer the most informative step result (skip generic fallback notes).
+  const meaningful = stepResults.filter(s => !/^fallback/i.test(s));
   let reply = "";
-  for (let i = stepResults.length - 1; i >= 0; i--) {
-    if (!/^fallback/i.test(stepResults[i])) { reply = stepResults[i]; break; }
+  if (meaningful.length) {
+    reply = meaningful.reduce((a, b) => (b.length > a.length ? b : a));
   }
   // Exploration/tool answers (e.g. "repo list dikhao") come through as info
   // events — surface them instead of a bare "completed".
