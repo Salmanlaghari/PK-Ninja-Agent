@@ -496,22 +496,23 @@ class Agent:
         # fetched immediately and follow-up messages operate on that repo.
         if "clone" in task_l or ("switch" in task_l and "repo" in task_l):
             import re as _re
-            mm = _re.search(
-                r"(?:clone|switch|open)[a-z\s]*?(?:repo\s+)?([a-z0-9][a-z0-9._\-]*)",
-                task_l)
-            hint = mm.group(1) if mm else ""
             try:
                 from github import list_user_repos as _lur
                 repos = _lur(self.settings, limit=100)
             except Exception as exc:
                 self.emit(EventType.error, f"GitHub repos fetch failed: {exc}")
                 return True
+            # Match by repo name appearing anywhere in the message — robust
+            # against Urdu filler words ("repo PK-AI clone karo").
+            task_flat = _re.sub(r"[^a-z0-9]", "", task_l)
             target = None
+            hint = ""
             for cand in repos:
-                nm = (cand.get("name") or "").lower().replace("-", "").replace("_", "")
-                fh = hint.replace("-", "").replace("_", "")
-                if hint and (hint in nm or fh == nm):
+                nm = (cand.get("name") or "").lower()
+                nm_flat = _re.sub(r"[^a-z0-9]", "", nm)
+                if nm_flat and nm_flat in task_flat:
                     target = cand
+                    hint = nm
                     break
             if not target:
                 names = ", ".join((c.get("name") or "") for c in repos[:20])
