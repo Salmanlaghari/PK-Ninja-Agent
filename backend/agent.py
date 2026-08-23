@@ -1117,6 +1117,72 @@ class Agent:
 
                 loop_count += 1
 
+    def _tool_provider(self):
+        """Provider for tool-selection calls (AI_TOOL_MODEL override supported)."""
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            from config import get_settings
+            settings = get_settings()
+        tool_model = (getattr(settings, "ai_tool_model", "") or "").strip()
+        if not tool_model or not hasattr(self.provider, "generate"):
+            return self.provider
+        try:
+            from ai_provider import OpenAIProvider
+            p = OpenAIProvider(settings, provider_hint=settings.ai_provider)
+            if p.model != tool_model:
+                p = OpenAIProvider(settings, provider_hint=settings.ai_provider)
+                p.model = tool_model
+            return p
+        except Exception:
+            return self.provider
+
+    @staticmethod
+    def _normalize_tool_decision(obj: dict) -> Optional[dict]:
+        """Accept {'tool','args'} and {'name','arguments'} shapes."""
+        if not isinstance(obj, dict):
+            return None
+        name = obj.get("tool") or obj.get("name")
+        args = obj.get("args")
+        if args is None:
+            args = obj.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {"input": args}
+        if not name or not isinstance(name, str):
+            return None
+        return {"tool": name.strip(), "args": args if isinstance(args, dict) else {}}
+
+    def _parse_tool_json(self, text: str) -> Optional[dict]:
+        """Extract a tool decision JSON from raw model text (fence-tolerant)."""
+        import re
+        cleaned = text.strip()
+        # Strip markdown code fences if present.
+        fence = re.search(r"```(?:json)?\s*(.+?)\s*```", cleaned, re.DOTALL)
+        if fence:
+            cleaned = fence.group(1).strip()
+        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if not m:
+            return None
+        for candidate in (m.group(0),):
+            try:
+                decision = self._normalize_tool_decision(json.loads(candidate))
+            except Exception:
+                continue
+            if decision:
+                return decision
+        # Last resort: first {...} block only (non-greedy).
+        m2 = re.search(r"\{[^{}]*\}", cleaned, re.DOTALL)
+        if m2:
+            try:
+                decision = self._normalize_tool_decision(json.loads(m2.group(0)))
+                if decision:
+                    return decision
+            except Exception:
+                pass
+        return None
+
     def _prompt_next_tool(self, step: dict, tool_history: List[dict], files: List[dict]) -> dict:
         import json
         files_brief = "\n".join(f["path"] for f in files[:30])
@@ -1169,23 +1235,49 @@ class Agent:
             )
         ]
 
-        try:
-            if hasattr(self.provider, "generate"):
-                text = self.provider.generate(messages)
-            else:
-                res = self.provider.stream_chat(messages)
-                text = res.text
+        provider = self._tool_provider()
+        last_error = None
+        for attempt in range(2):
+            try:
+                if hasattr(provider, "generate"):
+                    text = provider.generate(messages)
+                else:
+                    res = provider.stream_chat(messages)
+                    text = res.text
 
-            # Parse the JSON response
-            import re
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if m:
-                obj = json.loads(m.group(0))
-                if "tool" in obj:
-                    return obj
-        except Exception as e:
-            log.warning(f"Failed to query AI next tool: {e}")
-
+                decision = self._parse_tool_json(text)
+                if decision:
+                    return decision
+                last_error = f"unparseable response: {text[:200]}"
+            except Exception as e:
+                last_error = str(e)
+                log.warning(f"Failed to query AI next tool (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                # Retry once with a stricter, minimal prompt.
+                messages = [
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "You output exactly one JSON object, nothing else. "
+                            'Shape: {"tool": "<tool name>", "args": {...}}. '
+                            f"Valid tools: search_files, search_symbols, read_file, write_file, "
+                            f"edit_file, delete_file, git_status, git_diff, git_checkout, git_stage, "
+                            f"git_unstage, git_commit, git_push, run_command, indexing, testing, "
+                            "github_repos, github_issues, github_prs, github_repo_info, "
+                            "github_branches, finish_step. No markdown, no explanation."
+                        ),
+                    ),
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"Task: {self.description}\n"
+                            f"Step {step['id']}: {step['description']}\n"
+                            f"History: {json.dumps(tool_history, default=str)[:1500]}\n"
+                            "Next tool JSON:"
+                        ),
+                    ),
+                ]
+        log.warning(f"Tool decision failed after retry: {last_error}")
         return {"tool": "finish_step", "args": {"summary": "Fallback to completion"}}
 
     def _run_local_tool(self, name: str, args: dict, ws: Workspace, rt: TaskRuntime) -> dict:

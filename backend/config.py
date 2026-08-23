@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     ai_temperature: float = Field(default=0.2, alias="AI_TEMPERATURE")
     # Request timeout for AI calls (seconds).
     ai_timeout_seconds: int = Field(default=90, alias="AI_TIMEOUT_SECONDS")
+    # Optional dedicated model for tool-selection (executor) calls. Some
+    # models emit native tool-call syntax that APIs reject; a reliable
+    # JSON-emitting model can be pinned here without changing the main model.
+    ai_tool_model: str = Field(default="", alias="AI_TOOL_MODEL")
 
     # ── Legacy Gemini env vars (kept for backward compatibility) ────────
     # If AI_PROVIDER=gemini is set, these map into the OpenAI-compatible
@@ -281,6 +285,10 @@ class Settings(BaseSettings):
     def effective_model(self) -> str:
         """Resolve the model name from either the new or legacy env vars."""
         return self.ai_model or self.gemini_model
+
+    def effective_tool_model(self) -> str:
+        """Model used for tool-selection calls (falls back to main model)."""
+        return self.ai_tool_model or self.effective_model()
 
     def effective_jules_key(self) -> str:
         """Resolve the Jules API key.
