@@ -1427,6 +1427,7 @@ let evtSource = null;     // SSE fallback connection
 let useWS = false;        // whether we are on WebSocket transport
 let wsReconnectT = null;  // reconnect timer
 let wsDead = false;       // user-intentional close flag
+let wsProbe = 0;          // counter to verify edit tool
 
 // The current "thinking" streaming line; reused across token events
 let thinkingLine = null;
@@ -2088,11 +2089,12 @@ function wsUrl(taskId) {
 function startWebSocket(taskId) {
   useWS = true;
   wsDead = false;
+  wsOpened = false;
   if (wsReconnectT) { clearTimeout(wsReconnectT); wsReconnectT = null; }
   try { ws = new WebSocket(wsUrl(taskId)); }
   catch (e) { useWS = false; startSSE(taskId); return; }
 
-  ws.onopen = () => {};
+  ws.onopen = () => { wsOpened = true; };
   ws.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
@@ -2105,6 +2107,18 @@ function startWebSocket(taskId) {
   ws.onclose = () => {
     if (wsDead) return;
     if (!currentTaskId) return;
+    // Serverless platforms (e.g. Vercel functions) do not support WebSockets.
+    // If the socket never opened, retrying forever is pointless — fall back
+    // to SSE (EventSource), which works everywhere.
+    if (!wsOpened) {
+      useWS = false;
+      if (!sseFallbackUsed) {
+        sseFallbackUsed = true;
+        console.warn("WebSocket unavailable - falling back to SSE");
+        startSSE(currentTaskId);
+      }
+      return;
+    }
     wsReconnectT = setTimeout(() => {
       if (currentTaskId && !wsDead) startWebSocket(currentTaskId);
     }, 1200);
@@ -2210,28 +2224,48 @@ startBtn.addEventListener("click", async () => {
   if (!desc) { toast("Enter a task first.", "err"); return; }
   setRunningUI(true);
   closeTransport();
+  sseFallbackUsed = false;
   activity.innerHTML = "";
   terminal.innerHTML = "";
   thinkingLine = null;
   setStatus("running", "Starting");
   const planBox = $("execution-plan-box");
   if (planBox) planBox.hidden = true;
+  // Guard against a hung request (serverless time limits, dead network):
+  // abort after ~75s so the user gets a clear error instead of an infinite
+  // spinner.
+  const ctrl = new AbortController();
+  const timeoutT = setTimeout(() => ctrl.abort(), 75000);
   try {
     const r = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description: desc }),
+      signal: ctrl.signal,
     });
+    clearTimeout(timeoutT);
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
     currentTaskId = data.task_id;
-    wsDead = false;
-    if ("WebSocket" in window && window.WebSocket) {
-      startWebSocket(currentTaskId);
+    if (data.sync === true || data.status === "failed") {
+      // Serverless mode: the agent already ran inside the POST. Render the
+      // recorded events directly instead of waiting on a live stream.
+      await renderTaskEventsFromApi(currentTaskId);
     } else {
-      startSSE(currentTaskId);
+      wsDead = false;
+      if ("WebSocket" in window && window.WebSocket) {
+        startWebSocket(currentTaskId);
+      } else {
+        startSSE(currentTaskId);
+      }
     }
-    toast("Agent started", "ok");
+    if (data.status === "failed") {
+      setStatus("failed", "Failed");
+      setRunningUI(false);
+      toast("Agent failed - see activity log for details.", "err");
+    } else {
+      toast("Agent started", "ok");
+    }
 
     // Switch to activity tab on mobile automatically
     switchMobileTab("tab-activity");
@@ -2243,11 +2277,32 @@ startBtn.addEventListener("click", async () => {
       refreshExplorerTree();
     }, 1000);
   } catch (e) {
-    setStatus("failed", "Error");
+    clearTimeout(timeoutT);
+    const aborted = e && (e.name === "AbortError" || ctrl.signal.aborted);
+    setStatus("failed", aborted ? "Timeout" : "Error");
     setRunningUI(false);
-    toast("Failed to start: " + e.message, "err");
+    toast(aborted
+      ? "Server did not respond in time (timeout). Try again or check the provider."
+      : "Failed to start: " + e.message, "err");
   }
 });
+
+// Fetch a finished task's event history and render it in the activity feed.
+async function renderTaskEventsFromApi(taskId) {
+  try {
+    const r = await fetch(`/api/tasks/${taskId}`);
+    if (!r.ok) return;
+    const task = await r.json();
+    if (task.events && task.events.length) {
+      task.events.forEach(renderEvent);
+    } else {
+      clearPlaceholders();
+      activity.innerHTML = '<div class="empty-state">No events recorded for this task.</div>';
+    }
+  } catch (e) {
+    console.error("renderTaskEventsFromApi failed", e);
+  }
+}
 
 // ── Manual sandboxed terminal command ───────────────────────────────────
 async function runTerminalCommand() {

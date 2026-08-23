@@ -705,9 +705,48 @@ def _user_log_id(user: User) -> str:
 # (clone/commit/push/PR) for coding. It always works, regardless of whether
 # ``AUTH_GITHUB_ENABLED`` is set, because it is about repo access, not auth.
 
+# Cached (login, avatar) for the server-side env GITHUB_TOKEN. One live API
+# call per process; refreshed if the token changes.
+_ENV_GH_IDENTITY_CACHE: dict = {"token": None, "login": None, "avatar": None}
+
+
+def _env_github_identity() -> tuple:
+    """Best-effort (login, avatar) for the server-side env GitHub token."""
+    import httpx
+    settings = get_settings()
+    token = getattr(settings, "github_token", "") or ""
+    if not token:
+        return None, None
+    cache = _ENV_GH_IDENTITY_CACHE
+    if cache["token"] == token and cache["login"]:
+        return cache["login"], cache["avatar"]
+    try:
+        resp = httpx.get(
+            "https://api.github.com/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "pk-ninja-agent",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        info = resp.json()
+        cache.update(token=token, login=info.get("login"), avatar=info.get("avatar_url"))
+    except Exception as exc:  # noqa: BLE001 — status must never 500 over this
+        log.debug("env github identity lookup failed: %s", exc)
+    return cache["login"], cache["avatar"]
+
 @app.get("/api/github/status")
 async def github_status(user: User = Depends(current_user)) -> dict:
-    """Return non-secret status of the GitHub connection."""
+    """Return non-secret status of the GitHub connection.
+
+    v1.5.1: A server-side ``GITHUB_TOKEN`` env var counts as a real
+    connection too (with a cached live /user lookup for the login/avatar).
+    Previously only a per-user stored token counted, which made the app
+    report ``connected: false`` on ephemeral-serverless databases (Vercel)
+    even though all agent GitHub operations worked fine via the env token.
+    """
     settings = get_settings()
     connected = await has_secret(settings, user, "github_token")
     login = None
@@ -730,6 +769,12 @@ async def github_status(user: User = Depends(current_user)) -> dict:
             log.debug("could not read github prefs: %s", exc)
         if not repo:
             repo = settings.github_repo_full()
+    elif bool(getattr(settings, "github_token", "")):
+        # Server-side env token is configured — treat as connected and
+        # resolve the identity with a cached live /user call.
+        connected = True
+        login, avatar = _env_github_identity()
+        repo = settings.github_repo_full()
     configured_repo = settings.github_repo_full()
     return GitHubStatusOut(
         connected=connected,
@@ -1482,12 +1527,38 @@ async def api_create_task(body: TaskCreate,
     # stays alive until the agent completes. Background threads are frozen
     # after the HTTP response is sent on serverless runtimes.
     if is_serverless():
+        import concurrent.futures
         from agent import Agent
         agent = Agent(task_id, body.description, repo_full=repo, settings=user_settings)
+        status = "failed"
+        # Vercel enforces vercel.json maxDuration (60s). If the provider call
+        # (e.g. a slow/async provider) exceeds it, the platform kills the
+        # function with NO response and the frontend hangs forever. Enforce a
+        # slightly shorter deadline ourselves so we can return a real JSON
+        # response AND emit an error event the user can see in the chat.
+        deadline = min(55.0, float(os.environ.get("VERCEL_FUNCTION_MAX_DURATION", "60")) - 5.0)
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            agent.run()
+            fut = ex.submit(agent.run)
+            try:
+                fut.result(timeout=deadline)
+            except concurrent.futures.TimeoutError:
+                agent.rt.cancel.set()
+                agent.rt.status = TaskStatus.failed
+                try:
+                    agent.emit(EventType.error,
+                               f"Time limit reached ({int(deadline)}s) before the AI provider "
+                               "responded. Try a shorter task, or switch to a faster "
+                               "provider in Settings → Provider.",
+                               status="failed")
+                except Exception:  # noqa: BLE001 — event emission is best-effort
+                    pass
         except Exception:  # noqa: BLE001
             log.exception("Agent run failed (serverless sync)")
+        finally:
+            # Do NOT wait for the worker thread on timeout — returning the HTTP
+            # response promptly matters more; the platform reclaims the thread.
+            ex.shutdown(wait=False, cancel_futures=True)
         status = agent.rt.status.value if agent.rt else "failed"
         return {"task_id": task_id, "status": status,
                 "repository": repo, "sync": True}
