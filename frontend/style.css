@@ -1809,9 +1809,13 @@ body.theme-cyber .login-input {
 
 .msg.agent {
   align-self: flex-start;
-  background: var(--bg-elev, #161b22);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(135deg, #17263d, #121a28);
+  border: 1px solid rgba(88,166,255,0.30);
+  border-left: 3px solid #58a6ff;
   border-bottom-left-radius: 4px;
+}
+.msg.agent .msg-answer {
+  color: #dbe9ff;
 }
 
 .msg.agent.pending {
